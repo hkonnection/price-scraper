@@ -1,0 +1,17 @@
+{
+  "name": "price-scraper",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Costco price scraper for tracking deals in Western Canada",
+  "workspaces": [
+    "apps/*",
+    "scraper"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/web",
+    "build": "npm run build --workspace=apps/web",
+    "scrape": "npm run scrape --workspace=scraper"
+  },
+  "author": "John Kang",
+  "license": "PRIVATE"
+}
