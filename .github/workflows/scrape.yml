@@ -1,45 +1,45 @@
-name: Scrape Costco Deals                                                                                                                                                                                                
-                                                                                                                                                                                                                           
-  on:                                                                                                                                                                                                                      
-    workflow_dispatch:                                                                                                                                                                                                     
-      inputs:                                                                                                                                                                                                              
-        dry_run:                                                                                                                                                                                                           
-          description: 'Run without writing to database'                                                                                                                                                                   
-          required: false                                                                                                                                                                                                  
-          default: 'false'                                                                                                                                                                                                 
-          type: boolean                                                                                                                                                                                                    
-                                                                                                                                                                                                                           
-    repository_dispatch:                                                                                                                                                                                                   
-      types: [scrape-deals]                                                                                                                                                                                                
-                                                                                                                                                                                                                           
-  jobs:                                                                                                                                                                                                                    
-    scrape:                                                                                                                                                                                                                
-      runs-on: ubuntu-latest                                                                                                                                                                                               
-                                                                                                                                                                                                                           
-      steps:                                                                                                                                                                                                               
-        - name: Checkout code                                                                                                                                                                                              
-          uses: actions/checkout@v4                                                                                                                                                                                        
-                                                                                                                                                                                                                           
-        - name: Setup Node.js                                                                                                                                                                                              
-          uses: actions/setup-node@v4                                                                                                                                                                                      
-          with:                                                                                                                                                                                                            
-            node-version: '20'                                                                                                                                                                                             
-                                                                                                                                                                                                                           
-        - name: Install scraper dependencies                                                                                                                                                                               
-          run: npm install --workspace=scraper --legacy-peer-deps                                                                                                                                                          
-                                                                                                                                                                                                                           
-        - name: Run scraper                                                                                                                                                                                                
-          env:                                                                                                                                                                                                             
-            CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}                                                                                                                                                    
-            CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}                                                                                                                                                      
-            CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}                                                                                                                                            
-          run: |                                                                                                                                                                                                           
-            if [ "${{ inputs.dry_run }}" = "true" ]; then                                                                                                                                                                  
-              npm run scrape:dry                                                                                                                                                                                           
-            else                                                                                                                                                                                                           
-              npm run scrape                                                                                                                                                                                               
-            fi                                                                                                                                                                                                             
-          working-directory: scraper                                                                                                                                                                                       
-                                                                                                                                                                                                                           
-        - name: Summary                                                                                                                                                                                                    
-          run: echo "Scrape completed at $(date)"
+name: Scrape Costco Deals
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run without writing to database'
+        required: false
+        default: 'false'
+        type: boolean
+
+  repository_dispatch:
+    types: [scrape-deals]
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install scraper dependencies
+        run: npm install --workspace=scraper --legacy-peer-deps
+
+      - name: Run scraper
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run scrape:dry
+          else
+            npm run scrape
+          fi
+        working-directory: scraper
+
+      - name: Summary
+        run: echo "Scrape completed at $(date)"
