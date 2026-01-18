@@ -42,4 +42,4 @@ name: Scrape Costco Deals
           working-directory: scraper                                                                                                                                                                                       
                                                                                                                                                                                                                            
         - name: Summary                                                                                                                                                                                                    
-          run: echo "Scrape completed at $(date)"        
+          run: echo "Scrape completed at $(date)"
