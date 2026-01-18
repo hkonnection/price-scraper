@@ -84,7 +84,6 @@ function parseDealsFromPage($, source) {
       savings_amount: savings,
       savings_percent: Math.round(savingsPercent * 10) / 10,
       category: categorizeProduct(productName),
-      source: 'cocowest',
       scraped_at: new Date().toISOString(),
     });
   }
