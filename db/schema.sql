@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS deals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   retailer_id INTEGER NOT NULL,
   source_id INTEGER,
+  scrape_id INTEGER,
   product_code TEXT,
   product_name TEXT NOT NULL,
   regular_price REAL NOT NULL,
@@ -43,7 +44,8 @@ CREATE TABLE IF NOT EXISTS deals (
   scraped_at TEXT NOT NULL,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (retailer_id) REFERENCES retailers(id),
-  FOREIGN KEY (source_id) REFERENCES scrape_sources(id)
+  FOREIGN KEY (source_id) REFERENCES scrape_sources(id),
+  FOREIGN KEY (scrape_id) REFERENCES scrape_history(id)
 );
 
 -- Scrape history table
@@ -61,8 +63,10 @@ CREATE TABLE IF NOT EXISTS scrape_history (
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_deals_retailer ON deals(retailer_id);
 CREATE INDEX IF NOT EXISTS idx_deals_source ON deals(source_id);
+CREATE INDEX IF NOT EXISTS idx_deals_scrape ON deals(scrape_id);
 CREATE INDEX IF NOT EXISTS idx_deals_savings_percent ON deals(savings_percent DESC);
 CREATE INDEX IF NOT EXISTS idx_deals_category ON deals(category);
+CREATE INDEX IF NOT EXISTS idx_scrape_history_source ON scrape_history(source_id);
 
 -- Seed data
 INSERT OR IGNORE INTO retailers (name, slug, website, scrape_source) VALUES
