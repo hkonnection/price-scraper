@@ -46,42 +46,39 @@ export async function scrapeCocowest() {
 function parseDealsFromPage($, source) {
   const deals = [];
 
-  // Cocowest typically lists deals in the post content
-  // Look for price patterns like "$XX.XX" with savings info
-  const content = $('.entry-content').html() || $('article').html() || $('body').html();
+  // Get the main content text
+  const text = $('.entry-content').text() || $('article').text();
 
-  if (!content) {
+  if (!text) {
     console.log('No content found on page');
     return deals;
   }
 
-  // Extract text content and look for deal patterns
-  // Pattern: "Product Name ... $XX.XX ... Save $X.XX" or similar
-  const text = $('.entry-content').text() || $('article').text();
-
-  // Simple regex-based extraction (will need refinement based on actual page structure)
-  // Looking for patterns like: "Product Name $XX.XX Save $X.XX"
-  const pricePattern = /([A-Za-z][\w\s&\-\+\/\(\),'\.]+?)\s*\$(\d+\.?\d*)\s*(?:Save\s*\$(\d+\.?\d*))?/gi;
+  // Cocowest format: "1627198 DURACELL POWER BOOST AAA BATTERIES PACK OF 40 ($6.00 INSTANT SAVINGS EXPIRES ON 2026-01-25) $19.99"
+  // Pattern: {product_code} {PRODUCT NAME} (${savings} INSTANT SAVINGS EXPIRES ON {date}) ${sale_price}
+  const dealPattern = /(\d{6,7})\s+([A-Z][A-Z0-9\s&\-\+\/,'\.x×]+?)\s+\(\$(\d+\.?\d*)\s+INSTANT SAVINGS[^)]+\)\s+\$(\d+\.?\d*)/gi;
 
   let match;
-  while ((match = pricePattern.exec(text)) !== null) {
-    const productName = match[1].trim();
-    const price = parseFloat(match[2]);
-    const savings = match[3] ? parseFloat(match[3]) : 0;
+  while ((match = dealPattern.exec(text)) !== null) {
+    const productCode = match[1];
+    const productName = match[2].trim();
+    const savingsAmount = parseFloat(match[3]);
+    const salePrice = parseFloat(match[4]);
 
-    // Skip if product name is too short or looks like noise
-    if (productName.length < 3 || /^(and|the|for|with)$/i.test(productName)) {
+    // Skip if product name is too short
+    if (productName.length < 5) {
       continue;
     }
 
-    const regularPrice = price + savings;
-    const savingsPercent = savings > 0 ? (savings / regularPrice) * 100 : 0;
+    const regularPrice = salePrice + savingsAmount;
+    const savingsPercent = (savingsAmount / regularPrice) * 100;
 
     deals.push({
+      product_code: productCode,
       product_name: productName,
-      regular_price: regularPrice,
-      sale_price: price,
-      savings_amount: savings,
+      regular_price: Math.round(regularPrice * 100) / 100,
+      sale_price: salePrice,
+      savings_amount: savingsAmount,
       savings_percent: Math.round(savingsPercent * 10) / 10,
       category: categorizeProduct(productName),
       scraped_at: new Date().toISOString(),
