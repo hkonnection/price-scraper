@@ -1,6 +1,12 @@
 name: Scrape Costco Deals
 
 on:
+  # Auto-scrape on schedule (Costco flyers update Mondays)
+  schedule:
+    - cron: '0 17 * * 1'   # Monday 9am PST (5pm UTC)
+    - cron: '0 17 * * 4'   # Thursday 9am PST (backup/mid-week updates)
+
+  # Manual trigger
   workflow_dispatch:
     inputs:
       dry_run:
