@@ -8,8 +8,26 @@ import * as cheerio from 'cheerio';
 const COCOWEST_URL = 'https://cocowest.ca/';
 
 /**
- * Fetches and parses deals from Cocowest
- * @returns {Promise<Array<Deal>>} Array of deal objects
+ * Extracts flyer date range from URL or title.
+ * @param {string} url - Post URL like "costco-flyer-costco-sale-items-for-january-19-25-2026-for-bc-ab-sk-mb"
+ * @returns {string|null} Date range like "January 19-25, 2026"
+ */
+function extractFlyerDates(url) {
+  // Pattern: month-day-day-year (e.g., january-19-25-2026)
+  const match = url.match(/for-([a-z]+)-(\d+)-(\d+)-(\d{4})-for/i);
+  if (match) {
+    const month = match[1].charAt(0).toUpperCase() + match[1].slice(1);
+    const startDay = match[2];
+    const endDay = match[3];
+    const year = match[4];
+    return `${month} ${startDay}-${endDay}, ${year}`;
+  }
+  return null;
+}
+
+/**
+ * Fetches and parses deals from Cocowest.
+ * @returns {Promise<{deals: Array<Deal>, flyerDates: string|null}>} Deals and flyer date range
  */
 export async function scrapeCocowest() {
   // First, find the latest deals post
@@ -24,17 +42,23 @@ export async function scrapeCocowest() {
 
   if (!latestPostLink) {
     console.log('Could not find latest deals post. Trying homepage content...');
-    return parseDealsFromPage($, 'homepage');
+    return { deals: parseDealsFromPage($, 'homepage'), flyerDates: null };
   }
 
   console.log(`Found latest post: ${latestPostLink}`);
+
+  // Extract flyer dates from URL
+  const flyerDates = extractFlyerDates(latestPostLink);
+  if (flyerDates) {
+    console.log(`Flyer dates: ${flyerDates}`);
+  }
 
   // Fetch the actual deals post
   const postResponse = await fetch(latestPostLink);
   const postHtml = await postResponse.text();
   const post$ = cheerio.load(postHtml);
 
-  return parseDealsFromPage(post$, latestPostLink);
+  return { deals: parseDealsFromPage(post$, latestPostLink), flyerDates };
 }
 
 /**

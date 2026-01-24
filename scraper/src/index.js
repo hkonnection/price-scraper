@@ -15,8 +15,11 @@ async function main() {
   try {
     // Scrape deals from Cocowest
     console.log('\nFetching deals from Cocowest...');
-    const deals = await scrapeCocowest();
+    const { deals, flyerDates } = await scrapeCocowest();
     console.log(`Found ${deals.length} deals`);
+    if (flyerDates) {
+      console.log(`Flyer valid: ${flyerDates}`);
+    }
 
     if (deals.length === 0) {
       console.log('No deals found. Exiting.');
@@ -35,7 +38,7 @@ async function main() {
     } else {
       // Push to D1
       console.log('\nPushing deals to D1...');
-      await pushToD1(deals);
+      await pushToD1(deals, 'costco', flyerDates);
       console.log('Done!');
     }
   } catch (error) {

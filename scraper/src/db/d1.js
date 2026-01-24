@@ -33,13 +33,15 @@ async function getSourceId(retailerId) {
 /**
  * Creates a scrape history record.
  * @param {number} sourceId - Source ID
+ * @param {string|null} flyerDates - Flyer date range (e.g., "January 19-25, 2026")
  * @returns {Promise<number>} Scrape history ID
  */
-async function createScrapeHistory(sourceId) {
+async function createScrapeHistory(sourceId, flyerDates = null) {
   const startedAt = new Date().toISOString();
+  const flyerDatesPart = flyerDates ? `'${escapeSql(flyerDates)}'` : 'NULL';
   await queryD1(`
-    INSERT INTO scrape_history (source_id, started_at, status)
-    VALUES (${sourceId}, '${startedAt}', 'running')
+    INSERT INTO scrape_history (source_id, started_at, status, flyer_dates)
+    VALUES (${sourceId}, '${startedAt}', 'running', ${flyerDatesPart})
   `);
 
   // Get the ID of the record we just created
@@ -71,15 +73,16 @@ async function updateScrapeHistory(scrapeId, status, dealsCount = 0, errorMessag
  * Pushes deals to Cloudflare D1.
  * @param {Array<Deal>} deals - Array of deal objects
  * @param {string} retailerSlug - Retailer slug (e.g., 'costco')
+ * @param {string|null} flyerDates - Flyer date range (e.g., "January 19-25, 2026")
  */
-export async function pushToD1(deals, retailerSlug = 'costco') {
+export async function pushToD1(deals, retailerSlug = 'costco', flyerDates = null) {
   // Get retailer ID
   const retailerId = await getRetailerId(retailerSlug);
   console.log(`Retailer ID for ${retailerSlug}: ${retailerId}`);
 
   // Get source ID and create scrape history record
   const sourceId = await getSourceId(retailerId);
-  const scrapeId = await createScrapeHistory(sourceId || 1);
+  const scrapeId = await createScrapeHistory(sourceId || 1, flyerDates);
   console.log(`Created scrape history record: ${scrapeId}`);
 
   try {

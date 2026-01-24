@@ -5,6 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:cf": "npx @cloudflare/next-on-pages",
+    "preview": "wrangler pages dev .vercel/output/static --compatibility-flag=nodejs_compat",
+    "deploy": "wrangler pages deploy .vercel/output/static",
     "start": "next start",
     "lint": "next lint"
   },
@@ -18,6 +21,7 @@
     "@types/node": "^20.0.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "wrangler": "^3.0.0"
   }
 }
