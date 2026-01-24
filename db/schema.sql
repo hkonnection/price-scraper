@@ -1,35 +1,75 @@
--- Costco Deals Database Schema
--- Run this in Cloudflare D1 to create the tables
+-- Price Scraper Database Schema
+-- Supports multiple retailers and scrape sources
 
--- Deals table: stores all scraped deals
+-- Retailers table (Costco, Superstore, etc.)
+CREATE TABLE IF NOT EXISTS retailers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  slug TEXT NOT NULL UNIQUE,
+  website TEXT,
+  scrape_source TEXT,
+  region TEXT DEFAULT 'Western Canada',
+  is_active INTEGER DEFAULT 1,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Scrape sources table (cocowest, flipp, direct, etc.)
+CREATE TABLE IF NOT EXISTS scrape_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  retailer_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  url TEXT,
+  is_active INTEGER DEFAULT 1,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (retailer_id) REFERENCES retailers(id)
+);
+
+-- Deals table
 CREATE TABLE IF NOT EXISTS deals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  retailer_id INTEGER NOT NULL,
+  source_id INTEGER,
   product_name TEXT NOT NULL,
   regular_price REAL NOT NULL,
   sale_price REAL NOT NULL,
   savings_amount REAL NOT NULL,
   savings_percent REAL NOT NULL,
   category TEXT,
-  source TEXT NOT NULL,
   valid_from TEXT,
   valid_to TEXT,
   scraped_at TEXT NOT NULL,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (retailer_id) REFERENCES retailers(id),
+  FOREIGN KEY (source_id) REFERENCES scrape_sources(id)
 );
 
--- Index for common queries
-CREATE INDEX IF NOT EXISTS idx_deals_source ON deals(source);
-CREATE INDEX IF NOT EXISTS idx_deals_savings_percent ON deals(savings_percent DESC);
-CREATE INDEX IF NOT EXISTS idx_deals_category ON deals(category);
-CREATE INDEX IF NOT EXISTS idx_deals_scraped_at ON deals(scraped_at DESC);
-
--- Scrape history: tracks when scrapes ran
+-- Scrape history table
 CREATE TABLE IF NOT EXISTS scrape_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  source TEXT NOT NULL,
-  deals_count INTEGER NOT NULL,
+  source_id INTEGER NOT NULL,
+  deals_count INTEGER,
   started_at TEXT NOT NULL,
   completed_at TEXT,
   status TEXT DEFAULT 'running',
-  error_message TEXT
+  error_message TEXT,
+  FOREIGN KEY (source_id) REFERENCES scrape_sources(id)
 );
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_deals_retailer ON deals(retailer_id);
+CREATE INDEX IF NOT EXISTS idx_deals_source ON deals(source_id);
+CREATE INDEX IF NOT EXISTS idx_deals_savings_percent ON deals(savings_percent DESC);
+CREATE INDEX IF NOT EXISTS idx_deals_category ON deals(category);
+
+-- Seed data
+INSERT OR IGNORE INTO retailers (name, slug, website, scrape_source) VALUES
+  ('Costco', 'costco', 'https://costco.ca', 'cocowest');
+
+INSERT OR IGNORE INTO retailers (name, slug, website, scrape_source, is_active) VALUES
+  ('Real Canadian Superstore', 'superstore', 'https://realcanadiansuperstore.ca', 'flipp', 0),
+  ('Save-On-Foods', 'save-on-foods', 'https://saveonfoods.com', 'flipp', 0),
+  ('Walmart', 'walmart', 'https://walmart.ca', 'direct', 0);
+
+INSERT OR IGNORE INTO scrape_sources (retailer_id, name, slug, url) VALUES
+  (1, 'Cocowest Blog', 'cocowest', 'https://cocowest.ca');

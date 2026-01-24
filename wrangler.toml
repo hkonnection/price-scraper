@@ -9,4 +9,4 @@ compatibility_date = "2024-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "price-scraper-db"
-database_id = "" # TODO: Add after running: wrangler d1 create price-scraper-db
+database_id = "69c9546f-df32-4cde-9994-eec99600290b"

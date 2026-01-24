@@ -2,13 +2,14 @@ export const runtime = 'edge';
 
 interface Deal {
   id: number;
+  retailer_id: number;
+  retailer_name?: string;
   product_name: string;
   regular_price: number;
   sale_price: number;
   savings_amount: number;
   savings_percent: number;
   category: string;
-  source: string;
   valid_from: string;
   valid_to: string;
 }
@@ -19,9 +20,9 @@ export default async function Home() {
 
   return (
     <main style={{ padding: '2rem', fontFamily: 'system-ui, sans-serif' }}>
-      <h1>Costco Deals - Western Canada</h1>
+      <h1>Price Scraper - Western Canada</h1>
       <p style={{ color: '#666' }}>
-        Tracking deals from Costco BC, AB, SK, MB
+        Tracking deals from Costco, Superstore, Save-On-Foods & more
       </p>
 
       {deals.length === 0 ? (

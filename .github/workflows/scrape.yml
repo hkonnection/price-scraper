@@ -1,7 +1,6 @@
 name: Scrape Costco Deals
 
 on:
-  # Manual trigger from GitHub UI or API
   workflow_dispatch:
     inputs:
       dry_run:
@@ -10,7 +9,6 @@ on:
         default: 'false'
         type: boolean
 
-  # Webhook trigger from Cloudflare Worker
   repository_dispatch:
     types: [scrape-deals]
 
@@ -27,9 +25,8 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install dependencies
-        run: npm install
-        working-directory: scraper
+      - name: Install scraper dependencies
+        run: npm install --workspace=scraper --legacy-peer-deps
 
       - name: Run scraper
         env:
