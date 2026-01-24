@@ -34,15 +34,17 @@ export async function pushToD1(deals, retailerSlug = 'costco') {
   const deleteSQL = `DELETE FROM deals WHERE retailer_id = ${retailerId};`;
 
   const insertStatements = deals.map(deal => `
-    INSERT INTO deals (retailer_id, product_name, regular_price, sale_price, savings_amount, savings_percent, category, scraped_at)
+    INSERT INTO deals (retailer_id, product_code, product_name, regular_price, sale_price, savings_amount, savings_percent, category, image_url, scraped_at)
     VALUES (
       ${retailerId},
+      '${escapeSql(deal.product_code || '')}',
       '${escapeSql(deal.product_name)}',
       ${deal.regular_price},
       ${deal.sale_price},
       ${deal.savings_amount},
       ${deal.savings_percent},
       '${escapeSql(deal.category)}',
+      '${escapeSql(deal.image_url || '')}',
       '${deal.scraped_at}'
     );
   `).join('\n');

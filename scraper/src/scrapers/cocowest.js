@@ -46,6 +46,19 @@ export async function scrapeCocowest() {
 function parseDealsFromPage($, source) {
   const deals = [];
 
+  // Build image map from product codes in alt text
+  const imageMap = {};
+  $('img').each((i, el) => {
+    const alt = $(el).attr('alt') || '';
+    const imageSrc = $(el).attr('data-src') || $(el).attr('data-lazy-src') || $(el).attr('src') || '';
+
+    // Extract product code from alt text (e.g., "1627198 DURACELL...")
+    const codeMatch = alt.match(/^(\d{6,7})\s/);
+    if (codeMatch && imageSrc && !imageSrc.startsWith('data:')) {
+      imageMap[codeMatch[1]] = imageSrc;
+    }
+  });
+
   // Get the main content text
   const text = $('.entry-content').text() || $('article').text();
 
@@ -81,6 +94,7 @@ function parseDealsFromPage($, source) {
       savings_amount: savingsAmount,
       savings_percent: Math.round(savingsPercent * 10) / 10,
       category: categorizeProduct(productName),
+      image_url: imageMap[productCode] || null,
       scraped_at: new Date().toISOString(),
     });
   }
