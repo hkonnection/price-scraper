@@ -23,12 +23,25 @@ type SortKey = 'product_name' | 'regular_price' | 'sale_price' | 'savings_amount
 type SortDirection = 'asc' | 'desc';
 
 /**
+ * Formats a date string to "Jan 24, 2026, 9:18:52 PM" format.
+ */
+function formatDate(dateString: string): string {
+  const date = new Date(dateString);
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }) + ', ' + date.toLocaleTimeString('en-US');
+}
+
+/**
  * Sortable deals table component.
  * Displays product deals with clickable column headers for sorting.
  */
 export default function DealsTable({ deals, lastUpdated }: DealsTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>('savings_percent');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const [modalImage, setModalImage] = useState<{ url: string; name: string } | null>(null);
 
   const sortedDeals = useMemo(() => {
     return [...deals].sort((a, b) => {
@@ -81,7 +94,7 @@ export default function DealsTable({ deals, lastUpdated }: DealsTableProps) {
     <>
       {lastUpdated && (
         <p className="last-updated">
-          Last updated: {new Date(lastUpdated).toLocaleString()}
+          Last updated: {formatDate(lastUpdated)}
         </p>
       )}
       <p className="scroll-hint">← Swipe to see more →</p>
@@ -142,6 +155,8 @@ export default function DealsTable({ deals, lastUpdated }: DealsTableProps) {
                         alt={deal.product_name}
                         className="product-image"
                         loading="lazy"
+                        onClick={() => setModalImage({ url: deal.image_url!, name: deal.product_name })}
+                        style={{ cursor: 'pointer' }}
                       />
                     )}
                     <div>
@@ -174,6 +189,17 @@ export default function DealsTable({ deals, lastUpdated }: DealsTableProps) {
           </tbody>
         </table>
       </div>
+
+      {/* Image Modal */}
+      {modalImage && (
+        <div className="modal-overlay" onClick={() => setModalImage(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setModalImage(null)}>×</button>
+            <img src={modalImage.url} alt={modalImage.name} className="modal-image" />
+            <p className="modal-caption">{modalImage.name}</p>
+          </div>
+        </div>
+      )}
     </>
   );
 }
