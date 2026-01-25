@@ -16,14 +16,14 @@ export default function RefreshButton() {
 
     try {
       const response = await fetch('/api/trigger-scrape', { method: 'POST' });
-      const data = await response.json();
+      const data = await response.json() as { error?: string; message?: string };
 
       if (response.ok) {
         setMessage('Scraper triggered! Refresh in ~1 min.');
       } else {
         setMessage(data.error || 'Failed to trigger scraper');
       }
-    } catch (error) {
+    } catch {
       setMessage('Network error');
     } finally {
       setIsLoading(false);
