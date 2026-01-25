@@ -32,6 +32,14 @@ header {
   margin-bottom: 2rem;
 }
 
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
 header h1 {
   font-size: 1.75rem;
   font-weight: 600;
@@ -41,6 +49,39 @@ header h1 {
 header p {
   color: var(--text-muted);
   font-size: 0.95rem;
+}
+
+.refresh-container {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+
+.refresh-button {
+  background: var(--accent);
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.refresh-button:hover:not(:disabled) {
+  background: #059669;
+}
+
+.refresh-button:disabled {
+  background: #9ca3af;
+  cursor: not-allowed;
+}
+
+.refresh-message {
+  font-size: 0.8rem;
+  color: var(--text-muted);
 }
 
 .stats {

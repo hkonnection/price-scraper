@@ -1,6 +1,6 @@
 /**
  * Cocowest.ca Scraper
- * Scrapes Costco West deals from the Cocowest blog
+ * Scrapes Costco West deals from multiple Cocowest blog posts
  */
 
 import * as cheerio from 'cheerio';
@@ -8,57 +8,175 @@ import * as cheerio from 'cheerio';
 const COCOWEST_URL = 'https://cocowest.ca/';
 
 /**
- * Extracts flyer date range from URL or title.
- * @param {string} url - Post URL like "costco-flyer-costco-sale-items-for-january-19-25-2026-for-bc-ab-sk-mb"
- * @returns {string|null} Date range like "January 19-25, 2026"
+ * Parses date range from post title/URL.
+ * @param {string} text - Post title or URL containing dates
+ * @returns {{ validFrom: string, validTo: string } | null} ISO date strings or null
  */
-function extractFlyerDates(url) {
-  // Pattern: month-day-day-year (e.g., january-19-25-2026)
-  const match = url.match(/for-([a-z]+)-(\d+)-(\d+)-(\d{4})-for/i);
-  if (match) {
-    const month = match[1].charAt(0).toUpperCase() + match[1].slice(1);
-    const startDay = match[2];
-    const endDay = match[3];
-    const year = match[4];
-    return `${month} ${startDay}-${endDay}, ${year}`;
+function parseDateRange(text) {
+  // Pattern: "January 19-25, 2026" or "january-19-25-2026"
+  const patterns = [
+    // Title format: "January 19-25, 2026"
+    /(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})-(\d{1,2}),?\s*(\d{4})/i,
+    // URL format: "january-19-25-2026"
+    /for-(january|february|march|april|may|june|july|august|september|october|november|december)-(\d{1,2})-(\d{1,2})-(\d{4})/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      const monthNames = {
+        january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+        july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
+      };
+      const month = monthNames[match[1].toLowerCase()];
+      const startDay = parseInt(match[2]);
+      const endDay = parseInt(match[3]);
+      const year = parseInt(match[4]);
+
+      const validFrom = new Date(year, month, startDay);
+      const validTo = new Date(year, month, endDay, 23, 59, 59);
+
+      return {
+        validFrom: validFrom.toISOString().split('T')[0],
+        validTo: validTo.toISOString().split('T')[0],
+        displayDates: `${match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase()} ${startDay}-${endDay}, ${year}`
+      };
+    }
   }
   return null;
 }
 
 /**
+ * Finds all valid sales posts from the homepage.
+ * @param {CheerioAPI} $ - Cheerio instance of homepage
+ * @returns {Array<{url: string, title: string, validFrom: string, validTo: string, displayDates: string}>}
+ */
+function findSalesPosts($) {
+  const posts = [];
+  const seen = new Set();
+
+  // Find all post links that look like sales posts
+  $('a').each((i, el) => {
+    const href = $(el).attr('href') || '';
+    const text = $(el).text() || '';
+
+    // Skip if already seen this URL
+    if (seen.has(href)) return;
+
+    // Must be a sales post (flyer or weekend update)
+    const isSalesPost =
+      href.includes('costco-flyer-costco-sale-items') ||
+      href.includes('costco-sale-items-for') ||
+      href.includes('weekend-update-costco-sale-items');
+
+    if (!isSalesPost) return;
+
+    // Try to parse date range from URL or text
+    const dateRange = parseDateRange(href) || parseDateRange(text);
+    if (!dateRange) return;
+
+    seen.add(href);
+    posts.push({
+      url: href,
+      title: text.trim(),
+      ...dateRange
+    });
+  });
+
+  return posts;
+}
+
+/**
+ * Filters posts to only those valid for the current date.
+ * @param {Array} posts - Array of post objects with validFrom/validTo
+ * @returns {Array} Posts where today falls within the valid range
+ */
+function filterValidPosts(posts) {
+  const today = new Date().toISOString().split('T')[0];
+  return posts.filter(post => post.validFrom <= today && post.validTo >= today);
+}
+
+/**
  * Fetches and parses deals from Cocowest.
- * @returns {Promise<{deals: Array<Deal>, flyerDates: string|null}>} Deals and flyer date range
+ * Scrapes multiple posts and returns all deals with validity dates.
+ * @returns {Promise<{deals: Array<Deal>, posts: Array}>} Deals with validity dates
  */
 export async function scrapeCocowest() {
-  // First, find the latest deals post
+  // Fetch homepage
   const response = await fetch(COCOWEST_URL);
   const html = await response.text();
   const $ = cheerio.load(html);
 
-  // Find the latest flyer post link
-  // Cocowest typically titles these "Costco Flyer & Costco Sale Items for..."
-  const latestPostLink = $('a[href*="costco-flyer-costco-sale-items"]').first().attr('href')
-    || $('a[href*="weekend-update-costco-sale-items"]').first().attr('href');
+  // Find all sales posts
+  const allPosts = findSalesPosts($);
+  console.log(`Found ${allPosts.length} sales posts on homepage`);
 
-  if (!latestPostLink) {
-    console.log('Could not find latest deals post. Trying homepage content...');
-    return { deals: parseDealsFromPage($, 'homepage'), flyerDates: null };
+  // Filter to only currently valid posts
+  const validPosts = filterValidPosts(allPosts);
+  console.log(`${validPosts.length} posts are currently valid`);
+
+  if (validPosts.length === 0) {
+    console.log('No valid posts found. Using most recent post as fallback.');
+    if (allPosts.length > 0) {
+      validPosts.push(allPosts[0]);
+    }
   }
 
-  console.log(`Found latest post: ${latestPostLink}`);
+  // Scrape each valid post
+  const allDeals = [];
+  for (const post of validPosts) {
+    console.log(`\nScraping: ${post.displayDates}`);
+    console.log(`  URL: ${post.url}`);
 
-  // Extract flyer dates from URL
-  const flyerDates = extractFlyerDates(latestPostLink);
-  if (flyerDates) {
-    console.log(`Flyer dates: ${flyerDates}`);
+    try {
+      const postResponse = await fetch(post.url);
+      const postHtml = await postResponse.text();
+      const post$ = cheerio.load(postHtml);
+
+      const deals = parseDealsFromPage(post$, post.url);
+      console.log(`  Found ${deals.length} deals`);
+
+      // Tag each deal with validity dates
+      for (const deal of deals) {
+        deal.valid_from = post.validFrom;
+        deal.valid_to = post.validTo;
+        deal.source_post = post.displayDates;
+        allDeals.push(deal);
+      }
+    } catch (error) {
+      console.error(`  Error scraping post: ${error.message}`);
+    }
   }
 
-  // Fetch the actual deals post
-  const postResponse = await fetch(latestPostLink);
-  const postHtml = await postResponse.text();
-  const post$ = cheerio.load(postHtml);
+  // Deduplicate by product code (keep the one with latest valid_to)
+  const deduped = deduplicateDeals(allDeals);
+  console.log(`\nTotal unique deals: ${deduped.length}`);
 
-  return { deals: parseDealsFromPage(post$, latestPostLink), flyerDates };
+  return {
+    deals: deduped,
+    posts: validPosts,
+    flyerDates: validPosts.map(p => p.displayDates).join(' + ')
+  };
+}
+
+/**
+ * Deduplicates deals by product code, keeping the one with latest valid_to date.
+ * @param {Array} deals - Array of deals
+ * @returns {Array} Deduplicated deals
+ */
+function deduplicateDeals(deals) {
+  const byCode = new Map();
+
+  for (const deal of deals) {
+    const key = deal.product_code || deal.product_name;
+    const existing = byCode.get(key);
+
+    if (!existing || deal.valid_to > existing.valid_to) {
+      byCode.set(key, deal);
+    }
+  }
+
+  return Array.from(byCode.values());
 }
 
 /**

@@ -1,5 +1,6 @@
 import { getRequestContext } from '@cloudflare/next-on-pages';
 import DealsTable from './components/DealsTable';
+import RefreshButton from './components/RefreshButton';
 
 export const runtime = 'edge';
 
@@ -58,14 +59,18 @@ async function getDeals(): Promise<{ deals: Deal[]; lastUpdated: string | null; 
     const lastUpdated = scrapeResult?.completed_at || null;
     const flyerDates = scrapeResult?.flyer_dates || null;
 
-    // Get deals from latest scrape
+    // Get deals that are currently valid (today falls between valid_from and valid_to)
+    const today = new Date().toISOString().split('T')[0];
     const dealsResult = await db
       .prepare(`
         SELECT id, product_code, product_name, regular_price, sale_price,
-               savings_amount, savings_percent, category, image_url
+               savings_amount, savings_percent, category, image_url, valid_from, valid_to
         FROM deals
+        WHERE (valid_from IS NULL OR valid_from <= ?)
+          AND (valid_to IS NULL OR valid_to >= ?)
         ORDER BY savings_percent DESC
       `)
+      .bind(today, today)
       .all<Deal>();
 
     return {
@@ -92,8 +97,13 @@ export default async function Home() {
   return (
     <main className="container">
       <header>
-        <h1>Costco Deals - Western Canada</h1>
-        <p>Current sale items from Costco (BC, AB, SK, MB)</p>
+        <div className="header-row">
+          <div>
+            <h1>Costco Deals - Western Canada</h1>
+            <p>Current sale items from Costco (BC, AB, SK, MB)</p>
+          </div>
+          <RefreshButton />
+        </div>
         {flyerDates && (
           <p style={{ marginTop: '0.5rem', fontSize: '1.1rem', fontWeight: 500, color: '#10b981' }}>
             📅 Valid: {flyerDates}

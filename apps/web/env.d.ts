@@ -2,6 +2,7 @@
 
 interface CloudflareEnv {
   DB: D1Database;
+  GITHUB_TOKEN?: string;
 }
 
 declare module '@cloudflare/next-on-pages' {

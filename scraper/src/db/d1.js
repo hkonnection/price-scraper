@@ -90,9 +90,9 @@ export async function pushToD1(deals, retailerSlug = 'costco', flyerDates = null
     const deleteSQL = `DELETE FROM deals WHERE retailer_id = ${retailerId};`;
     await queryD1(deleteSQL);
 
-    // Insert new deals with scrape_id
+    // Insert new deals with scrape_id and validity dates
     const insertStatements = deals.map(deal => `
-      INSERT INTO deals (retailer_id, scrape_id, product_code, product_name, regular_price, sale_price, savings_amount, savings_percent, category, image_url, scraped_at)
+      INSERT INTO deals (retailer_id, scrape_id, product_code, product_name, regular_price, sale_price, savings_amount, savings_percent, category, image_url, valid_from, valid_to, scraped_at)
       VALUES (
         ${retailerId},
         ${scrapeId},
@@ -104,6 +104,8 @@ export async function pushToD1(deals, retailerSlug = 'costco', flyerDates = null
         ${deal.savings_percent},
         '${escapeSql(deal.category)}',
         '${escapeSql(deal.image_url || '')}',
+        ${deal.valid_from ? `'${deal.valid_from}'` : 'NULL'},
+        ${deal.valid_to ? `'${deal.valid_to}'` : 'NULL'},
         '${deal.scraped_at}'
       );
     `).join('\n');
