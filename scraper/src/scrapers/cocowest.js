@@ -13,21 +13,56 @@ const COCOWEST_URL = 'https://cocowest.ca/';
  * @returns {{ validFrom: string, validTo: string } | null} ISO date strings or null
  */
 function parseDateRange(text) {
-  // Pattern: "January 19-25, 2026" or "january-19-25-2026"
-  const patterns = [
-    // Title format: "January 19-25, 2026"
-    /(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})-(\d{1,2}),?\s*(\d{4})/i,
-    // URL format: "january-19-25-2026"
-    /for-(january|february|march|april|may|june|july|august|september|october|november|december)-(\d{1,2})-(\d{1,2})-(\d{4})/i,
+  const monthNames = {
+    january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+    july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
+  };
+  const monthPattern = '(january|february|march|april|may|june|july|august|september|october|november|december)';
+
+  // Cross-month patterns (must check before same-month patterns)
+  const crossMonthPatterns = [
+    // Title format: "January 26 – February 1, 2026" (em dash, en dash, or hyphen)
+    new RegExp(`${monthPattern}\\s+(\\d{1,2})\\s*[–—-]\\s*${monthPattern}\\s+(\\d{1,2}),?\\s*(\\d{4})`, 'i'),
+    // URL format: "for-january-26-february-1-2026"
+    new RegExp(`for-${monthPattern}-(\\d{1,2})-${monthPattern}-(\\d{1,2})-(\\d{4})`, 'i'),
   ];
 
-  for (const pattern of patterns) {
+  for (const pattern of crossMonthPatterns) {
     const match = text.match(pattern);
     if (match) {
-      const monthNames = {
-        january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
-        july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
+      const startMonth = monthNames[match[1].toLowerCase()];
+      const startDay = parseInt(match[2]);
+      const endMonth = monthNames[match[3].toLowerCase()];
+      const endDay = parseInt(match[4]);
+      const year = parseInt(match[5]);
+
+      const validFrom = new Date(year, startMonth, startDay);
+      // Handle year rollover (December → January)
+      const endYear = endMonth < startMonth ? year + 1 : year;
+      const validTo = new Date(endYear, endMonth, endDay, 23, 59, 59);
+
+      const startMonthName = match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
+      const endMonthName = match[3].charAt(0).toUpperCase() + match[3].slice(1).toLowerCase();
+
+      return {
+        validFrom: validFrom.toISOString().split('T')[0],
+        validTo: validTo.toISOString().split('T')[0],
+        displayDates: `${startMonthName} ${startDay} - ${endMonthName} ${endDay}, ${endYear}`
       };
+    }
+  }
+
+  // Same-month patterns
+  const sameMonthPatterns = [
+    // Title format: "January 19-25, 2026"
+    new RegExp(`${monthPattern}\\s+(\\d{1,2})-(\\d{1,2}),?\\s*(\\d{4})`, 'i'),
+    // URL format: "january-19-25-2026"
+    new RegExp(`for-${monthPattern}-(\\d{1,2})-(\\d{1,2})-(\\d{4})`, 'i'),
+  ];
+
+  for (const pattern of sameMonthPatterns) {
+    const match = text.match(pattern);
+    if (match) {
       const month = monthNames[match[1].toLowerCase()];
       const startDay = parseInt(match[2]);
       const endDay = parseInt(match[3]);
