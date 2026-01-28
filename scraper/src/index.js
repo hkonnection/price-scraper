@@ -5,6 +5,7 @@
 
 import { scrapeCocowest } from './scrapers/cocowest.js';
 import { pushToD1 } from './db/d1.js';
+import { getCleaner } from './cleaners/index.js';
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
@@ -15,8 +16,12 @@ async function main() {
   try {
     // Scrape deals from Cocowest
     console.log('\nFetching deals from Cocowest...');
-    const { deals, flyerDates } = await scrapeCocowest();
-    console.log(`Found ${deals.length} deals`);
+    const { deals: rawDeals, flyerDates } = await scrapeCocowest();
+    console.log(`Found ${rawDeals.length} deals`);
+
+    // Clean deals with Costco-specific cleaner (adds brand, promo_type)
+    const costcoCleaner = await getCleaner('costco');
+    const deals = costcoCleaner.clean(rawDeals);
     if (flyerDates) {
       console.log(`Flyer valid: ${flyerDates}`);
     }

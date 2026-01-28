@@ -33,11 +33,13 @@ CREATE TABLE IF NOT EXISTS deals (
   scrape_id INTEGER,
   product_code TEXT,
   product_name TEXT NOT NULL,
+  brand TEXT,
   regular_price REAL NOT NULL,
   sale_price REAL NOT NULL,
   savings_amount REAL NOT NULL,
   savings_percent REAL NOT NULL,
   category TEXT,
+  promo_type TEXT,
   image_url TEXT,
   valid_from TEXT,
   valid_to TEXT,
@@ -67,6 +69,8 @@ CREATE INDEX IF NOT EXISTS idx_deals_source ON deals(source_id);
 CREATE INDEX IF NOT EXISTS idx_deals_scrape ON deals(scrape_id);
 CREATE INDEX IF NOT EXISTS idx_deals_savings_percent ON deals(savings_percent DESC);
 CREATE INDEX IF NOT EXISTS idx_deals_category ON deals(category);
+CREATE INDEX IF NOT EXISTS idx_deals_promo_type ON deals(promo_type);
+CREATE INDEX IF NOT EXISTS idx_deals_brand ON deals(brand);
 CREATE INDEX IF NOT EXISTS idx_scrape_history_source ON scrape_history(source_id);
 
 -- Seed data
@@ -78,5 +82,11 @@ INSERT OR IGNORE INTO retailers (name, slug, website, scrape_source, is_active) 
   ('Save-On-Foods', 'save-on-foods', 'https://saveonfoods.com', 'flipp', 0),
   ('Walmart', 'walmart', 'https://walmart.ca', 'direct', 0);
 
+INSERT OR IGNORE INTO retailers (name, slug, website, scrape_source, is_active) VALUES
+  ('Carter''s Oshkosh', 'carters', 'https://www.cartersoshkosh.ca', 'manual', 1);
+
 INSERT OR IGNORE INTO scrape_sources (retailer_id, name, slug, url) VALUES
   (1, 'Cocowest Blog', 'cocowest', 'https://cocowest.ca');
+
+INSERT OR IGNORE INTO scrape_sources (retailer_id, name, slug, url) VALUES
+  ((SELECT id FROM retailers WHERE slug = 'carters'), 'Manual Extract', 'manual-extract', NULL);
