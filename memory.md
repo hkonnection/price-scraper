@@ -4,6 +4,56 @@ Work sessions in descending order.
 
 ---
 
+## 2026-01-28 (Tuesday) — Multi-Retailer Deploy & Carter's Import Testing
+
+**Goal:** Deploy multi-retailer feature, run D1 migrations, test Carter's import
+
+### What was done:
+
+**Database Migration (run manually on Cloudflare D1 console):**
+- Added `brand` and `promo_type` columns to deals table
+- Added Carter's Oshkosh retailer (id=3, scrape_source='manual')
+- Added Manual Extract scrape source for Carter's (retailer_id=3)
+- Created indexes on brand and promo_type columns
+
+**Code Deployment:**
+- Committed and merged `feature/multi-retailer-deals` branch to main
+- Commit `b870655`: feat: multi-retailer support with Carter's import
+- Cloudflare Pages auto-deployed
+
+**New Files Created:**
+- `apps/web/src/app/components/DealsPageClient.tsx` — Client wrapper with filters
+- `apps/web/src/app/components/ImportModal.tsx` — JSON paste import modal
+- `apps/web/src/app/api/import-deals/route.ts` — POST endpoint for imports
+- `scraper/src/cleaners/carters.js` — Carter's data cleaner
+- `scraper/src/cleaners/costco.js` — Costco data cleaner
+- `scraper/src/cleaners/index.js` — Cleaner registry
+
+**UI Features Deployed:**
+- Retailer dropdown (defaults to Costco, includes "All Retailers")
+- Category and sale type filters (dynamic based on selected retailer)
+- Import button (only shows for manual-source retailers)
+- Retailer badges in "All Retailers" view
+- Brand display in product cells
+
+**Carter's Extraction Testing:**
+- New sale URL: `https://www.cartersoshkosh.ca/en_CA/carters-sale?sz=3000`
+- Discovered DOM render limit: site caps at 2000 product tiles regardless of sz parameter
+- Total inventory shows 2,648 but only 2,000 extractable
+- Extracted 2,000 products for initial import test
+
+### Pending / Future Enhancements:
+- [ ] Import with sale category selector (Clearance, $10 & Under, Valentine's, etc.)
+- [ ] Deduplication with category merging (same product in multiple sales)
+- [ ] R2 image storage (free tier: 10GB storage, 10M reads/month)
+- [ ] Multi-category import workflow for Carter's sections
+
+### Key Learning:
+- `PRAGMA table_info(tablename);` — SQLite command to inspect table schema
+- Carter's DOM caps at 2000 rendered products regardless of URL parameters
+
+---
+
 ## 2026-01-27 (Monday) — Angela's Feature Requirements
 
 **Source:** Requirements from Angela (John's wife)
@@ -22,11 +72,11 @@ Work sessions in descending order.
 - Each new retailer needs: retailer record, scrape_source record, scraper or import method
 
 ### Pending work:
-- [ ] Add Carter's to retailers table (active)
-- [ ] Build retailer dropdown filter on frontend
-- [ ] Update API to support `?retailer=all|costco|carters` filter
-- [ ] Create import script to push Carter's cleaned data to D1
-- [ ] Build manual import UI (paste JSON / upload file)
+- [x] Add Carter's to retailers table (active) — Done 2026-01-28
+- [x] Build retailer dropdown filter on frontend — Done 2026-01-28
+- [x] Update API to support retailer filtering — Done 2026-01-28 (client-side filtering)
+- [x] Create import endpoint to push Carter's data to D1 — Done 2026-01-28
+- [x] Build manual import UI (paste JSON) — Done 2026-01-28
 - [ ] Research additional Canadian retailers for scrapeability
 
 ---
@@ -63,9 +113,9 @@ Work sessions in descending order.
 - Clearance items have no end date (prices as marked)
 
 ### Pending:
-- Add Carter's as retailer in D1 database
-- Create import script to push cleaned data to D1
-- Build manual import UI (paste JSON / upload file workflow)
+- [x] Add Carter's as retailer in D1 database — Done 2026-01-28
+- [x] Create import endpoint to push cleaned data to D1 — Done 2026-01-28
+- [x] Build manual import UI (paste JSON workflow) — Done 2026-01-28
 
 ---
 
@@ -138,5 +188,30 @@ Work sessions in descending order.
 | Database | Cloudflare D1 (SQLite) |
 | Scraper | Node.js + Cheerio |
 | Automation | GitHub Actions (cron + webhook) |
-| Current scrapers | Cocowest (Costco deals) |
-| Pending scrapers | Carter's Oshkosh Canada (manual extract) |
+| Active retailers | Costco (auto via Cocowest), Carter's Oshkosh (manual import) |
+| Image storage | Hotlinked (future: Cloudflare R2) |
+
+## Browser Console Extraction Script (Carter's)
+
+URL: `https://www.cartersoshkosh.ca/en_CA/carters-sale?sz=3000`
+
+```javascript
+const products = [];
+document.querySelectorAll('.product[data-pid]').forEach(tile => {
+  const pid = tile.dataset.pid || '';
+  const brand = tile.querySelector('.product-tile-brand')?.textContent?.trim() || '';
+  const name = tile.querySelector('.product-tile-title')?.textContent?.trim() || '';
+  const salePrice = tile.querySelector('.product-tile-price-sale .value')?.getAttribute('content') || '';
+  const origPrice = tile.querySelector('.product-tile-price-original .value')?.getAttribute('content') || '';
+  const discount = tile.querySelector('.discount')?.textContent?.trim() || '';
+  const image = tile.querySelector('.tile-image')?.src || '';
+  const promo = tile.querySelector('.promotion-callout-text')?.textContent?.trim() || '';
+  if (name) {
+    products.push({ product_code: pid, brand, product_name: name, sale_price: parseFloat(salePrice) || 0, regular_price: parseFloat(origPrice) || 0, discount, promo, image_url: image });
+  }
+});
+copy(products);
+console.log(`Extracted ${products.length} products - copied to clipboard`);
+```
+
+Note: Site caps at 2000 DOM elements regardless of sz parameter.
