@@ -4,6 +4,45 @@ Work sessions in descending order.
 
 ---
 
+## 2026-01-30 (Friday) — Carter's Import UX Improvements
+
+**Goal:** Improve Carter's import workflow for large datasets (2700+ products)
+
+### Problems Solved:
+1. **Clipboard size limits** — Console script used `copy()` which failed on large arrays
+2. **Textarea paste issues** — Browser freezes when pasting 2700+ product JSON
+
+### What was done:
+
+**Console Script Update:**
+- Created `useful.js` with reusable browser scripts
+- Carter's extraction script now downloads JSON file instead of copying to clipboard
+- File named with date: `carters-products-2026-01-30.json`
+
+**ImportModal UX Redesign:**
+- Added tabbed interface: "Upload File" (default) | "Paste JSON" (fallback)
+- Drag & drop zone for JSON files
+- File validation with product count display
+- Preview showing first 3 products with prices
+- Dynamic submit button: "Import 2,648" instead of generic "Submit"
+- Clear file button to reset selection
+
+**Files Modified:**
+- `apps/web/src/app/components/ImportModal.tsx` — Complete rewrite with file upload
+- `apps/web/src/app/globals.css` — Added styles for tabs, drop zone, file info, preview
+
+**Files Created:**
+- `useful.js` — Browser console scripts (Carter's extraction with file download)
+
+### Updated Workflow:
+1. Navigate to `https://www.cartersoshkosh.ca/en_CA/carters-sale?sz=2000`
+2. If "Show More" button appears, click to load remaining products
+3. Open browser console, paste `cartersExtract()` function, run it
+4. JSON file auto-downloads
+5. In app, click "Import Deals" → drag/drop the JSON file → click "Import X,XXX"
+
+---
+
 ## 2026-01-28 (Tuesday) — Multi-Retailer Deploy & Carter's Import Testing
 
 **Goal:** Deploy multi-retailer feature, run D1 migrations, test Carter's import

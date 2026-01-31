@@ -560,3 +560,173 @@ header p {
   background: #9ca3af;
   cursor: not-allowed;
 }
+
+/* Import tabs */
+.import-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.import-tab {
+  padding: 0.625rem 1.25rem;
+  border: none;
+  background: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.import-tab:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.import-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.import-tab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Drop zone */
+.drop-zone {
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  padding: 2.5rem 1.5rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.drop-zone:hover {
+  border-color: var(--accent);
+  background: rgba(16, 185, 129, 0.04);
+}
+
+.drop-zone.dragging {
+  border-color: var(--accent);
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.drop-zone-icon {
+  font-size: 2.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.drop-zone-text {
+  font-size: 0.95rem;
+  color: var(--text);
+  line-height: 1.6;
+}
+
+.drop-zone-text span {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+/* File info */
+.file-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.875rem 1rem;
+  background: var(--accent-light);
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.file-info-content {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.file-info-icon {
+  color: #065f46;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.file-info-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.file-info-name {
+  font-weight: 500;
+  color: #065f46;
+  font-size: 0.9rem;
+}
+
+.file-info-count {
+  font-size: 0.8rem;
+  color: #047857;
+}
+
+.file-info-clear {
+  background: none;
+  border: none;
+  color: #065f46;
+  font-size: 1.25rem;
+  cursor: pointer;
+  padding: 0.25rem;
+  line-height: 1;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+}
+
+.file-info-clear:hover:not(:disabled) {
+  opacity: 1;
+}
+
+.file-info-clear:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* Import preview */
+.import-preview {
+  background: #f9f9f9;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.import-preview-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.625rem;
+}
+
+.import-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.import-preview-item {
+  font-size: 0.85rem;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.import-preview-more {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-top: 0.25rem;
+}
