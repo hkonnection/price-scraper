@@ -62,32 +62,36 @@ async function getData(): Promise<{
       .all<Retailer>();
     const retailers = retailersResult.results || [];
 
-    // Get latest scrape dates for each retailer
+    // Get latest scrape dates for each retailer (simple GROUP BY)
     const datesResult = await db
       .prepare(`
-        SELECT r.slug, sh.completed_at, sh.flyer_dates
+        SELECT r.slug, MAX(sh.completed_at) as completed_at
         FROM scrape_history sh
         JOIN scrape_sources ss ON sh.source_id = ss.id
         JOIN retailers r ON ss.retailer_id = r.id
         WHERE sh.status = 'completed'
-          AND sh.id = (
-            SELECT MAX(sh2.id)
-            FROM scrape_history sh2
-            JOIN scrape_sources ss2 ON sh2.source_id = ss2.id
-            WHERE ss2.retailer_id = r.id AND sh2.status = 'completed'
-          )
+        GROUP BY r.slug
       `)
-      .all<{ slug: string; completed_at: string; flyer_dates: string | null }>();
+      .all<{ slug: string; completed_at: string }>();
 
     const retailerDates: Record<string, string> = {};
-    let flyerDates: string | null = null;
-
     for (const row of datesResult.results || []) {
       retailerDates[row.slug] = row.completed_at;
-      if (row.slug === 'costco' && row.flyer_dates) {
-        flyerDates = row.flyer_dates;
-      }
     }
+
+    // Get Costco flyer dates separately (simple single-row query)
+    const flyerResult = await db
+      .prepare(`
+        SELECT sh.flyer_dates
+        FROM scrape_history sh
+        JOIN scrape_sources ss ON sh.source_id = ss.id
+        JOIN retailers r ON ss.retailer_id = r.id
+        WHERE sh.status = 'completed' AND r.slug = 'costco'
+        ORDER BY sh.id DESC LIMIT 1
+      `)
+      .first<{ flyer_dates: string | null }>();
+
+    const flyerDates = flyerResult?.flyer_dates || null;
 
     // Get all current deals with retailer info
     const today = new Date().toISOString().split('T')[0];
