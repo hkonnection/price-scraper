@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
 import DealsTable from './DealsTable';
 import ImportModal from './ImportModal';
 
@@ -41,10 +42,26 @@ interface DealsPageClientProps {
  * stats display, import modal, and renders the DealsTable.
  */
 export default function DealsPageClient({ deals, retailers, retailerDates, flyerDates }: DealsPageClientProps) {
-  const [selectedRetailer, setSelectedRetailer] = useState('costco');
+  const searchParams = useSearchParams();
+  const router = useRouter();
+
+  // Initialize retailer from URL param, default to 'costco'
+  const initialRetailer = searchParams.get('retailer') || 'costco';
+  const [selectedRetailer, setSelectedRetailer] = useState(initialRetailer);
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [selectedPromoType, setSelectedPromoType] = useState('all');
   const [showImportModal, setShowImportModal] = useState(false);
+
+  // Sync URL when retailer changes
+  useEffect(() => {
+    const currentParam = searchParams.get('retailer');
+    if (selectedRetailer !== currentParam) {
+      const url = selectedRetailer === 'costco'
+        ? '/'
+        : `/?retailer=${selectedRetailer}`;
+      router.replace(url, { scroll: false });
+    }
+  }, [selectedRetailer, searchParams, router]);
 
   const filteredDeals = useMemo(() => {
     return deals.filter(deal => {

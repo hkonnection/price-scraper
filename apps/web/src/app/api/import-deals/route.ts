@@ -29,7 +29,10 @@ interface ImportRequest {
  * @returns {object[]} Cleaned deals ready for D1 insertion
  */
 function cleanCartersDeals(rawDeals: RawDeal[], pulledDate: string) {
-  const scrapedAt = pulledDate ? new Date(pulledDate).toISOString() : new Date().toISOString();
+  // Use noon to avoid timezone-induced date shifts (YYYY-MM-DD parsed as UTC can shift dates)
+  const scrapedAt = pulledDate
+    ? new Date(pulledDate + 'T12:00:00').toISOString()
+    : new Date().toISOString();
 
   return rawDeals.map(product => {
     let savingsPercent = 0;
