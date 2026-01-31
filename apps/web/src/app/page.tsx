@@ -36,14 +36,24 @@ const MOCK_DEALS: Deal[] = [
  * Fetches all active retailers and their current deals from D1.
  * Falls back to mock data for local development.
  */
-async function getData(): Promise<{ deals: Deal[]; retailers: Retailer[]; lastUpdated: string | null; flyerDates: string | null }> {
+async function getData(): Promise<{
+  deals: Deal[];
+  retailers: Retailer[];
+  retailerDates: Record<string, string>;
+  flyerDates: string | null;
+}> {
   try {
     const { env } = getRequestContext();
     const db = env.DB;
 
     if (!db) {
       console.log('D1 not bound - using mock data for local preview');
-      return { deals: MOCK_DEALS, retailers: MOCK_RETAILERS, lastUpdated: new Date().toISOString(), flyerDates: 'January 19-25, 2026' };
+      return {
+        deals: MOCK_DEALS,
+        retailers: MOCK_RETAILERS,
+        retailerDates: { costco: new Date().toISOString(), carters: new Date().toISOString() },
+        flyerDates: 'January 19-25, 2026',
+      };
     }
 
     // Get active retailers
@@ -52,20 +62,32 @@ async function getData(): Promise<{ deals: Deal[]; retailers: Retailer[]; lastUp
       .all<Retailer>();
     const retailers = retailersResult.results || [];
 
-    // Get latest Costco scrape info for flyer dates
-    const scrapeResult = await db
+    // Get latest scrape dates for each retailer
+    const datesResult = await db
       .prepare(`
-        SELECT sh.completed_at, sh.flyer_dates
+        SELECT r.slug, sh.completed_at, sh.flyer_dates
         FROM scrape_history sh
         JOIN scrape_sources ss ON sh.source_id = ss.id
         JOIN retailers r ON ss.retailer_id = r.id
-        WHERE sh.status = 'completed' AND r.slug = 'costco'
-        ORDER BY sh.id DESC LIMIT 1
+        WHERE sh.status = 'completed'
+          AND sh.id = (
+            SELECT MAX(sh2.id)
+            FROM scrape_history sh2
+            JOIN scrape_sources ss2 ON sh2.source_id = ss2.id
+            WHERE ss2.retailer_id = r.id AND sh2.status = 'completed'
+          )
       `)
-      .first<{ completed_at: string; flyer_dates: string | null }>();
+      .all<{ slug: string; completed_at: string; flyer_dates: string | null }>();
 
-    const lastUpdated = scrapeResult?.completed_at || null;
-    const flyerDates = scrapeResult?.flyer_dates || null;
+    const retailerDates: Record<string, string> = {};
+    let flyerDates: string | null = null;
+
+    for (const row of datesResult.results || []) {
+      retailerDates[row.slug] = row.completed_at;
+      if (row.slug === 'costco' && row.flyer_dates) {
+        flyerDates = row.flyer_dates;
+      }
+    }
 
     // Get all current deals with retailer info
     const today = new Date().toISOString().split('T')[0];
@@ -86,24 +108,29 @@ async function getData(): Promise<{ deals: Deal[]; retailers: Retailer[]; lastUp
     return {
       deals: dealsResult.results || [],
       retailers,
-      lastUpdated,
+      retailerDates,
       flyerDates,
     };
   } catch (error) {
     console.log('D1 error - using mock data:', error);
-    return { deals: MOCK_DEALS, retailers: MOCK_RETAILERS, lastUpdated: new Date().toISOString(), flyerDates: 'January 19-25, 2026' };
+    return {
+      deals: MOCK_DEALS,
+      retailers: MOCK_RETAILERS,
+      retailerDates: { costco: new Date().toISOString(), carters: new Date().toISOString() },
+      flyerDates: 'January 19-25, 2026',
+    };
   }
 }
 
 export default async function Home() {
-  const { deals, retailers, lastUpdated, flyerDates } = await getData();
+  const { deals, retailers, retailerDates, flyerDates } = await getData();
 
   return (
     <main className="container">
       <DealsPageClient
         deals={deals}
         retailers={retailers}
-        lastUpdated={lastUpdated}
+        retailerDates={retailerDates}
         flyerDates={flyerDates}
       />
     </main>

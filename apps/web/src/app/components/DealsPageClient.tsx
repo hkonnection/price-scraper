@@ -32,7 +32,7 @@ export interface Deal {
 interface DealsPageClientProps {
   deals: Deal[];
   retailers: Retailer[];
-  lastUpdated: string | null;
+  retailerDates: Record<string, string>;
   flyerDates: string | null;
 }
 
@@ -40,7 +40,7 @@ interface DealsPageClientProps {
  * Client-side wrapper that manages retailer/category/sale-type filters,
  * stats display, import modal, and renders the DealsTable.
  */
-export default function DealsPageClient({ deals, retailers, lastUpdated, flyerDates }: DealsPageClientProps) {
+export default function DealsPageClient({ deals, retailers, retailerDates, flyerDates }: DealsPageClientProps) {
   const [selectedRetailer, setSelectedRetailer] = useState('costco');
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [selectedPromoType, setSelectedPromoType] = useState('all');
@@ -83,6 +83,11 @@ export default function DealsPageClient({ deals, retailers, lastUpdated, flyerDa
     : selectedRetailer === 'all'
       ? 'Deals across all retailers'
       : `Current deals from ${activeRetailer?.name || selectedRetailer}`;
+
+  // Get the last updated date for the selected retailer (null for "all" view)
+  const lastUpdated = selectedRetailer === 'all'
+    ? null
+    : retailerDates[selectedRetailer] || null;
 
   /**
    * Resets category/promo filters when retailer changes.
