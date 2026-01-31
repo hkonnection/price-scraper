@@ -29,6 +29,7 @@ export default function ImportModal({ retailerSlug, retailerName, onClose, onSuc
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successCount, setSuccessCount] = useState<number | null>(null);
+  const [pulledDate, setPulledDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   /**
@@ -146,7 +147,7 @@ export default function ImportModal({ retailerSlug, retailerName, onClose, onSuc
       const response = await fetch('/api/import-deals', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ retailer: retailerSlug, deals: dealsToSubmit }),
+        body: JSON.stringify({ retailer: retailerSlug, deals: dealsToSubmit, pulledDate }),
       });
 
       const data = await response.json() as { error?: string; count?: number; message?: string };
@@ -270,6 +271,18 @@ export default function ImportModal({ retailerSlug, retailerName, onClose, onSuc
                       </div>
                     </div>
                   )}
+
+                  {/* Date picker for when data was pulled */}
+                  <div className="import-date-field">
+                    <label htmlFor="pulled-date">Data pulled on (optional):</label>
+                    <input
+                      type="date"
+                      id="pulled-date"
+                      value={pulledDate}
+                      onChange={(e) => setPulledDate(e.target.value)}
+                      disabled={isLoading}
+                    />
+                  </div>
                 </>
               )}
             </>
@@ -289,6 +302,18 @@ export default function ImportModal({ retailerSlug, retailerName, onClose, onSuc
                 disabled={isLoading}
                 rows={12}
               />
+
+              {/* Date picker for when data was pulled */}
+              <div className="import-date-field">
+                <label htmlFor="pulled-date-paste">Data pulled on (optional):</label>
+                <input
+                  type="date"
+                  id="pulled-date-paste"
+                  value={pulledDate}
+                  onChange={(e) => setPulledDate(e.target.value)}
+                  disabled={isLoading}
+                />
+              </div>
             </>
           )}
 

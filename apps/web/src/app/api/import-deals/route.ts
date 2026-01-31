@@ -17,6 +17,7 @@ interface RawDeal {
 interface ImportRequest {
   retailer: string;
   deals: RawDeal[];
+  pulledDate?: string;
 }
 
 /**
@@ -24,9 +25,12 @@ interface ImportRequest {
  * Extracts discount %, calculates savings, sets promo_type.
  *
  * @param {RawDeal[]} rawDeals - Raw deals from browser console extraction
+ * @param {string} pulledDate - Date when data was pulled (YYYY-MM-DD format)
  * @returns {object[]} Cleaned deals ready for D1 insertion
  */
-function cleanCartersDeals(rawDeals: RawDeal[]) {
+function cleanCartersDeals(rawDeals: RawDeal[], pulledDate: string) {
+  const scrapedAt = pulledDate ? new Date(pulledDate).toISOString() : new Date().toISOString();
+
   return rawDeals.map(product => {
     let savingsPercent = 0;
     if (product.discount) {
@@ -56,13 +60,13 @@ function cleanCartersDeals(rawDeals: RawDeal[]) {
       product_url: product.product_url || '',
       valid_from: new Date().toISOString().split('T')[0],
       valid_to: null as string | null,
-      scraped_at: new Date().toISOString(),
+      scraped_at: scrapedAt,
     };
   });
 }
 
 /** Map of retailer slugs to their cleaning functions. */
-const cleaners: Record<string, (deals: RawDeal[]) => ReturnType<typeof cleanCartersDeals>> = {
+const cleaners: Record<string, (deals: RawDeal[], pulledDate: string) => ReturnType<typeof cleanCartersDeals>> = {
   carters: cleanCartersDeals,
 };
 
@@ -92,7 +96,7 @@ export async function POST(request: Request) {
     }
 
     const body: ImportRequest = await request.json();
-    const { retailer, deals } = body;
+    const { retailer, deals, pulledDate } = body;
 
     // Validate retailer
     if (!retailer || typeof retailer !== 'string') {
@@ -132,8 +136,9 @@ export async function POST(request: Request) {
       return Response.json({ error: `No cleaner registered for retailer "${retailer}"` }, { status: 400 });
     }
 
-    // Clean the deals
-    const cleanedDeals = cleanFn(deals);
+    // Clean the deals (use pulledDate or default to today)
+    const effectiveDate = pulledDate || new Date().toISOString().split('T')[0];
+    const cleanedDeals = cleanFn(deals, effectiveDate);
 
     // Get source ID
     const sourceRow = await db

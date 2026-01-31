@@ -24,6 +24,7 @@ export interface Deal {
   promo_type: string | null;
   image_url: string | null;
   product_url: string | null;
+  scraped_at: string;
   retailer_slug: string;
   retailer_name: string;
 }

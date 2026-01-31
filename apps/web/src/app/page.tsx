@@ -16,6 +16,7 @@ interface DealRow {
   promo_type: string | null;
   image_url: string | null;
   product_url: string | null;
+  scraped_at: string;
   retailer_slug: string;
   retailer_name: string;
 }
@@ -27,8 +28,8 @@ const MOCK_RETAILERS: Retailer[] = [
 ];
 
 const MOCK_DEALS: Deal[] = [
-  { id: 1, product_code: '1627198', product_name: 'DURACELL POWER BOOST AAA BATTERIES PACK OF 40', brand: 'Costco', regular_price: 25.99, sale_price: 19.99, savings_amount: 6, savings_percent: 23.1, category: 'Other', promo_type: 'Instant Savings', image_url: null, product_url: null, retailer_slug: 'costco', retailer_name: 'Costco West' },
-  { id: 2, product_code: '2945480', product_name: 'MONDETTA CORDUROY PANT WOMENS SIZES XL-XXL', brand: 'Costco', regular_price: 17.99, sale_price: 7.99, savings_amount: 10, savings_percent: 55.6, category: 'Other', promo_type: 'Instant Savings', image_url: null, product_url: null, retailer_slug: 'costco', retailer_name: 'Costco West' },
+  { id: 1, product_code: '1627198', product_name: 'DURACELL POWER BOOST AAA BATTERIES PACK OF 40', brand: 'Costco', regular_price: 25.99, sale_price: 19.99, savings_amount: 6, savings_percent: 23.1, category: 'Other', promo_type: 'Instant Savings', image_url: null, product_url: null, scraped_at: new Date().toISOString(), retailer_slug: 'costco', retailer_name: 'Costco West' },
+  { id: 2, product_code: '2945480', product_name: 'MONDETTA CORDUROY PANT WOMENS SIZES XL-XXL', brand: 'Costco', regular_price: 17.99, sale_price: 7.99, savings_amount: 10, savings_percent: 55.6, category: 'Other', promo_type: 'Instant Savings', image_url: null, product_url: null, scraped_at: new Date().toISOString(), retailer_slug: 'costco', retailer_name: 'Costco West' },
 ];
 
 /**
@@ -72,7 +73,7 @@ async function getData(): Promise<{ deals: Deal[]; retailers: Retailer[]; lastUp
       .prepare(`
         SELECT d.id, d.product_code, d.product_name, d.brand, d.regular_price, d.sale_price,
                d.savings_amount, d.savings_percent, d.category, d.promo_type, d.image_url,
-               d.product_url, r.slug as retailer_slug, r.name as retailer_name
+               d.product_url, d.scraped_at, r.slug as retailer_slug, r.name as retailer_name
         FROM deals d
         JOIN retailers r ON d.retailer_id = r.id
         WHERE (d.valid_from IS NULL OR d.valid_from <= ?)

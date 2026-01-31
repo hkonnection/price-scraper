@@ -15,6 +15,7 @@ interface Deal {
   promo_type: string | null;
   image_url: string | null;
   product_url: string | null;
+  scraped_at: string;
   retailer_slug: string;
   retailer_name: string;
 }
@@ -38,6 +39,27 @@ function formatDate(dateString: string): string {
     day: 'numeric',
     year: 'numeric',
   }) + ', ' + date.toLocaleTimeString('en-US');
+}
+
+/**
+ * Formats a date string to short format "Jan 24" or "Jan 24, 2025" if not current year.
+ */
+function formatShortDate(dateString: string): string {
+  const date = new Date(dateString);
+  const currentYear = new Date().getFullYear();
+  const dateYear = date.getFullYear();
+
+  if (dateYear === currentYear) {
+    return date.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+    });
+  }
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
 }
 
 /**
@@ -135,6 +157,11 @@ export default function DealsTable({ deals, lastUpdated, showRetailer = false }:
                   Retailer
                 </th>
               )}
+              {showRetailer && (
+                <th style={{ whiteSpace: 'nowrap' }}>
+                  Updated
+                </th>
+              )}
               <th
                 className={getSortClass('product_name')}
                 onClick={() => handleSort('product_name')}
@@ -185,6 +212,11 @@ export default function DealsTable({ deals, lastUpdated, showRetailer = false }:
                     <span className={getRetailerBadgeClass(deal.retailer_slug)}>
                       {deal.retailer_name}
                     </span>
+                  </td>
+                )}
+                {showRetailer && (
+                  <td className="updated-cell">
+                    {formatShortDate(deal.scraped_at)}
                   </td>
                 )}
                 <td>
