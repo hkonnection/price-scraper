@@ -188,6 +188,17 @@ header p {
   font-weight: 500;
 }
 
+.product-link {
+  color: var(--text);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.product-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
 .product-code {
   font-size: 0.75rem;
   color: var(--text-muted);

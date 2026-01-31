@@ -14,6 +14,7 @@ interface Deal {
   category: string;
   promo_type: string | null;
   image_url: string | null;
+  product_url: string | null;
   retailer_slug: string;
   retailer_name: string;
 }
@@ -199,7 +200,13 @@ export default function DealsTable({ deals, lastUpdated, showRetailer = false }:
                       />
                     )}
                     <div>
-                      <div className="product-name">{deal.product_name}</div>
+                      {deal.product_url ? (
+                        <a href={deal.product_url} target="_blank" rel="noopener noreferrer" className="product-name product-link">
+                          {deal.product_name}
+                        </a>
+                      ) : (
+                        <div className="product-name">{deal.product_name}</div>
+                      )}
                       {deal.brand && <div className="product-brand">{deal.brand}</div>}
                       {deal.product_code && (
                         <div className="product-code">#{deal.product_code}</div>

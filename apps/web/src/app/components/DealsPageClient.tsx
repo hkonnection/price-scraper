@@ -23,6 +23,7 @@ export interface Deal {
   category: string;
   promo_type: string | null;
   image_url: string | null;
+  product_url: string | null;
   retailer_slug: string;
   retailer_name: string;
 }

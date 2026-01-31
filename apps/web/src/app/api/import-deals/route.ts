@@ -11,6 +11,7 @@ interface RawDeal {
   discount?: string;
   promo?: string;
   image_url?: string;
+  product_url?: string;
 }
 
 interface ImportRequest {
@@ -52,6 +53,7 @@ function cleanCartersDeals(rawDeals: RawDeal[]) {
       category: product.promo || 'Clearance',
       promo_type: product.promo || 'Clearance',
       image_url: product.image_url || '',
+      product_url: product.product_url || '',
       valid_from: new Date().toISOString().split('T')[0],
       valid_to: null as string | null,
       scraped_at: new Date().toISOString(),
@@ -167,8 +169,8 @@ export async function POST(request: Request) {
       const batch = cleanedDeals.slice(i, i + BATCH_SIZE);
       const statements = batch.map(deal =>
         db.prepare(
-          `INSERT INTO deals (retailer_id, scrape_id, product_code, product_name, brand, regular_price, sale_price, savings_amount, savings_percent, category, promo_type, image_url, valid_from, valid_to, scraped_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO deals (retailer_id, scrape_id, product_code, product_name, brand, regular_price, sale_price, savings_amount, savings_percent, category, promo_type, image_url, product_url, valid_from, valid_to, scraped_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           retailerRow.id,
           scrapeId,
@@ -182,6 +184,7 @@ export async function POST(request: Request) {
           deal.category,
           deal.promo_type || null,
           deal.image_url || null,
+          deal.product_url || null,
           deal.valid_from || null,
           deal.valid_to || null,
           deal.scraped_at,
