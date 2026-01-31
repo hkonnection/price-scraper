@@ -1,0 +1,62 @@
+name: Scrape Toys R Us Canada Deals
+
+on:
+  # Auto-scrape on schedule (weekly on Wednesdays)
+  schedule:
+    - cron: '0 17 * * 3'   # Wednesday 9am PST (5pm UTC)
+
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run without writing to database'
+        required: false
+        default: 'false'
+        type: boolean
+      limit:
+        description: 'Maximum products to scrape (leave empty for all)'
+        required: false
+        type: string
+
+  repository_dispatch:
+    types: [scrape-toysrus-deals]
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install scraper dependencies
+        run: npm install --legacy-peer-deps
+        working-directory: scraper
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+        working-directory: scraper
+
+      - name: Run scraper
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ -n "${{ inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ inputs.limit }}"
+          fi
+          node --experimental-vm-modules src/toysrus-index.js $ARGS
+        working-directory: scraper
+
+      - name: Summary
+        run: echo "Toys R Us Canada scrape completed at $(date)"

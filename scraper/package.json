@@ -5,10 +5,14 @@
   "type": "module",
   "scripts": {
     "scrape": "node --experimental-vm-modules src/index.js",
-    "scrape:dry": "node --experimental-vm-modules src/index.js --dry-run"
+    "scrape:dry": "node --experimental-vm-modules src/index.js --dry-run",
+    "scrape:toysrus": "node --experimental-vm-modules src/toysrus-index.js",
+    "scrape:toysrus:dry": "node --experimental-vm-modules src/toysrus-index.js --dry-run",
+    "scrape:toysrus:limit": "node --experimental-vm-modules src/toysrus-index.js --dry-run --limit 50"
   },
   "dependencies": {
     "cheerio": "^1.0.0-rc.12",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "playwright": "^1.41.0"
   }
 }
