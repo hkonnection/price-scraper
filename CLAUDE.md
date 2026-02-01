@@ -189,6 +189,62 @@ Raises:
 - Review similar implementations in the codebase
 - Understand the existing patterns and conventions
 
+### Database Operations
+
+**CRITICAL: All database commands are run manually on Cloudflare D1.**
+
+- **DO NOT** assume column names - always check `db/schema.sql` first
+- **DO NOT** generate SQL without verifying the actual table structure
+- When providing INSERT/UPDATE statements, ensure they match the schema exactly
+- John runs all database migrations and data inserts manually via Cloudflare dashboard
+
+**Before writing ANY SQL:**
+1. Read `db/schema.sql` to verify table structure
+2. Check column names, types, and constraints
+3. Look at existing INSERT statements for patterns
+
+### Query Efficiency
+
+**ALWAYS prefer multiple simple queries over single complex queries.**
+
+This is a deliberate architectural decision to avoid technical debt and stay within serverless limits (Cloudflare Workers, Vercel Edge, etc.).
+
+**Why multiple simple queries are better:**
+- **Predictable performance** - Each query has bounded execution time
+- **Easier debugging** - Isolate which query is slow
+- **Serverless-friendly** - Avoids CPU/memory limits (e.g., Cloudflare Error 1102)
+- **Maintainable** - Easier to understand and modify later
+- **Cacheable** - Simple queries can be cached independently
+
+**Patterns to AVOID:**
+```sql
+-- ❌ Correlated subquery (runs inner query for EVERY row)
+SELECT * FROM orders WHERE id = (
+  SELECT MAX(id) FROM orders o2 WHERE o2.customer_id = orders.customer_id
+)
+
+-- ❌ Multiple JOINs with aggregations in one query
+SELECT a.*, b.*, COUNT(c.*), SUM(d.amount)
+FROM a JOIN b JOIN c JOIN d
+GROUP BY a.id, b.id
+```
+
+**Patterns to USE:**
+```sql
+-- ✅ Simple GROUP BY
+SELECT customer_id, MAX(created_at) as latest
+FROM orders
+GROUP BY customer_id
+
+-- ✅ Separate queries for different concerns
+-- Query 1: Get the list
+SELECT * FROM products WHERE category = 'electronics'
+-- Query 2: Get the count (if needed separately)
+SELECT COUNT(*) FROM products WHERE category = 'electronics'
+```
+
+**Rule of thumb:** If a query has nested subqueries or complex JOINs with aggregations, split it into 2-3 simpler queries. The network overhead of multiple queries is almost always less than the CPU cost of one expensive query in serverless environments.
+
 ### Documentation Standards
 **All documentation files must be stored in `.docs/` directory with timestamped filenames:**
 
@@ -337,6 +393,14 @@ Remember:
 - If something seems wrong or could be improved, speak up
 - Provide alternatives when you see better solutions
 - Think about long-term maintainability, not just immediate solutions
+
+## New Retailer Worktree Workflow
+
+**Trigger command:** `@new-retailer [retailer-name]`
+
+When this command is used, read `scraper/NEW-RETAILER-WORKFLOW.md` for the full 7-step workflow.
+
+**Key point:** Always validate the retailer (check for `compare_at_price` data) BEFORE creating the worktree.
 
 ## PRD Template Files
 
