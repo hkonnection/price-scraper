@@ -17,6 +17,7 @@ interface DealRow {
   image_url: string | null;
   product_url: string | null;
   scraped_at: string;
+  in_stock: number;
   retailer_slug: string;
   retailer_name: string;
 }
@@ -28,8 +29,8 @@ const MOCK_RETAILERS: Retailer[] = [
 ];
 
 const MOCK_DEALS: Deal[] = [
-  { id: 1, product_code: '1627198', product_name: 'DURACELL POWER BOOST AAA BATTERIES PACK OF 40', brand: 'Costco', regular_price: 25.99, sale_price: 19.99, savings_amount: 6, savings_percent: 23.1, category: 'Other', promo_type: 'Instant Savings', image_url: null, product_url: null, scraped_at: new Date().toISOString(), retailer_slug: 'costco', retailer_name: 'Costco West' },
-  { id: 2, product_code: '2945480', product_name: 'MONDETTA CORDUROY PANT WOMENS SIZES XL-XXL', brand: 'Costco', regular_price: 17.99, sale_price: 7.99, savings_amount: 10, savings_percent: 55.6, category: 'Other', promo_type: 'Instant Savings', image_url: null, product_url: null, scraped_at: new Date().toISOString(), retailer_slug: 'costco', retailer_name: 'Costco West' },
+  { id: 1, product_code: '1627198', product_name: 'DURACELL POWER BOOST AAA BATTERIES PACK OF 40', brand: 'Costco', regular_price: 25.99, sale_price: 19.99, savings_amount: 6, savings_percent: 23.1, category: 'Other', promo_type: 'Instant Savings', image_url: null, product_url: null, scraped_at: new Date().toISOString(), in_stock: 1, retailer_slug: 'costco', retailer_name: 'Costco West' },
+  { id: 2, product_code: '2945480', product_name: 'MONDETTA CORDUROY PANT WOMENS SIZES XL-XXL', brand: 'Costco', regular_price: 17.99, sale_price: 7.99, savings_amount: 10, savings_percent: 55.6, category: 'Other', promo_type: 'Instant Savings', image_url: null, product_url: null, scraped_at: new Date().toISOString(), in_stock: 1, retailer_slug: 'costco', retailer_name: 'Costco West' },
 ];
 
 /**
@@ -94,17 +95,19 @@ async function getData(): Promise<{
     const flyerDates = flyerResult?.flyer_dates || null;
 
     // Get all current deals with retailer info
+    // Sort: in-stock first, then by savings_percent descending
     const today = new Date().toISOString().split('T')[0];
     const dealsResult = await db
       .prepare(`
         SELECT d.id, d.product_code, d.product_name, d.brand, d.regular_price, d.sale_price,
                d.savings_amount, d.savings_percent, d.category, d.promo_type, d.image_url,
-               d.product_url, d.scraped_at, r.slug as retailer_slug, r.name as retailer_name
+               d.product_url, d.scraped_at, COALESCE(d.in_stock, 1) as in_stock,
+               r.slug as retailer_slug, r.name as retailer_name
         FROM deals d
         JOIN retailers r ON d.retailer_id = r.id
         WHERE (d.valid_from IS NULL OR d.valid_from <= ?)
           AND (d.valid_to IS NULL OR d.valid_to >= ?)
-        ORDER BY d.savings_percent DESC
+        ORDER BY COALESCE(d.in_stock, 1) DESC, d.savings_percent DESC
       `)
       .bind(today, today)
       .all<DealRow>();

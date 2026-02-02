@@ -782,3 +782,24 @@ header p {
   color: var(--text-muted);
   white-space: nowrap;
 }
+
+/* Sold out items */
+.sold-out-row {
+  opacity: 0.5;
+}
+
+.sold-out-row td {
+  background: #f3f4f6;
+}
+
+.sold-out-badge {
+  display: inline-block;
+  padding: 0.15rem 0.4rem;
+  margin-bottom: 0.25rem;
+  border-radius: 3px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  background: #fecaca;
+  color: #991b1b;
+}

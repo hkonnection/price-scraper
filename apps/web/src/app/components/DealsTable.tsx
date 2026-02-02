@@ -16,6 +16,7 @@ interface Deal {
   image_url: string | null;
   product_url: string | null;
   scraped_at: string;
+  in_stock: number;
   retailer_slug: string;
   retailer_name: string;
 }
@@ -88,6 +89,11 @@ export default function DealsTable({ deals, lastUpdated, showRetailer = false }:
 
   const sortedDeals = useMemo(() => {
     return [...deals].sort((a, b) => {
+      // Out-of-stock items always go to bottom
+      if (a.in_stock !== b.in_stock) {
+        return b.in_stock - a.in_stock; // in_stock=1 first, in_stock=0 last
+      }
+
       const aVal = a[sortKey];
       const bVal = b[sortKey];
 
@@ -206,7 +212,7 @@ export default function DealsTable({ deals, lastUpdated, showRetailer = false }:
           </thead>
           <tbody>
             {sortedDeals.map((deal) => (
-              <tr key={deal.id}>
+              <tr key={deal.id} className={deal.in_stock === 0 ? 'sold-out-row' : ''}>
                 {showRetailer && (
                   <td>
                     <span className={getRetailerBadgeClass(deal.retailer_slug)}>
@@ -232,6 +238,9 @@ export default function DealsTable({ deals, lastUpdated, showRetailer = false }:
                       />
                     )}
                     <div>
+                      {deal.in_stock === 0 && (
+                        <span className="sold-out-badge">Sold Out</span>
+                      )}
                       {deal.product_url ? (
                         <a href={deal.product_url} target="_blank" rel="noopener noreferrer" className="product-name product-link">
                           {deal.product_name}

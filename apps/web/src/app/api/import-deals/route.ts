@@ -12,6 +12,7 @@ interface RawDeal {
   promo?: string;
   image_url?: string;
   product_url?: string;
+  in_stock?: boolean;
 }
 
 interface ImportRequest {
@@ -46,7 +47,8 @@ function cleanCartersDeals(rawDeals: RawDeal[], pulledDate: string) {
     const savingsAmount = Math.round((regularPrice - salePrice) * 100) / 100;
 
     if (!savingsPercent && regularPrice > 0) {
-      savingsPercent = Math.round((savingsAmount / regularPrice) * 100);
+      // Keep 2 decimal places for accurate sorting (display as whole number)
+      savingsPercent = Math.round((savingsAmount / regularPrice) * 10000) / 100;
     }
 
     return {
@@ -64,6 +66,7 @@ function cleanCartersDeals(rawDeals: RawDeal[], pulledDate: string) {
       valid_from: new Date().toISOString().split('T')[0],
       valid_to: null as string | null,
       scraped_at: scrapedAt,
+      in_stock: product.in_stock !== false ? 1 : 0,
     };
   });
 }
@@ -177,8 +180,8 @@ export async function POST(request: Request) {
       const batch = cleanedDeals.slice(i, i + BATCH_SIZE);
       const statements = batch.map(deal =>
         db.prepare(
-          `INSERT INTO deals (retailer_id, scrape_id, product_code, product_name, brand, regular_price, sale_price, savings_amount, savings_percent, category, promo_type, image_url, product_url, valid_from, valid_to, scraped_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO deals (retailer_id, scrape_id, product_code, product_name, brand, regular_price, sale_price, savings_amount, savings_percent, category, promo_type, image_url, product_url, valid_from, valid_to, scraped_at, in_stock)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           retailerRow.id,
           scrapeId,
@@ -196,6 +199,7 @@ export async function POST(request: Request) {
           deal.valid_from || null,
           deal.valid_to || null,
           deal.scraped_at,
+          deal.in_stock,
         )
       );
       await db.batch(statements);
