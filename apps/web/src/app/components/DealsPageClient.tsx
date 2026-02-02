@@ -4,6 +4,7 @@ import { useState, useMemo, useEffect } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import DealsTable from './DealsTable';
 import ImportModal from './ImportModal';
+import RefreshButton from './RefreshButton';
 
 export interface Retailer {
   id: number;
@@ -85,6 +86,7 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
 
   const activeRetailer = retailers.find(r => r.slug === selectedRetailer);
   const showImportButton = activeRetailer?.scrape_source === 'manual';
+  const showRefreshButton = activeRetailer && activeRetailer.scrape_source !== 'manual' && selectedRetailer !== 'all';
 
   const totalDeals = filteredDeals.length;
   const avgSavings = totalDeals > 0
@@ -130,6 +132,7 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
                 Import Deals
               </button>
             )}
+            {showRefreshButton && <RefreshButton />}
           </div>
         </div>
         {flyerDates && selectedRetailer === 'costco' && (
