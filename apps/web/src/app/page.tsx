@@ -95,6 +95,7 @@ async function getData(): Promise<{
     const flyerDates = flyerResult?.flyer_dates || null;
 
     // Get all current deals with retailer info
+    // Filter out invalid deals (no regular price or no savings)
     // Sort: in-stock first, then by savings_percent descending
     const today = new Date().toISOString().split('T')[0];
     const dealsResult = await db
@@ -107,6 +108,8 @@ async function getData(): Promise<{
         JOIN retailers r ON d.retailer_id = r.id
         WHERE (d.valid_from IS NULL OR d.valid_from <= ?)
           AND (d.valid_to IS NULL OR d.valid_to >= ?)
+          AND d.regular_price > 0
+          AND d.savings_percent > 0
         ORDER BY COALESCE(d.in_stock, 1) DESC, d.savings_percent DESC
       `)
       .bind(today, today)
