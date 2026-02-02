@@ -1,6 +1,7 @@
 /**
  * Cocowest.ca Scraper
- * Scrapes Costco West deals from multiple Cocowest blog posts
+ * Scrapes Costco West deals from multiple Cocowest blog posts.
+ * Uses content-based detection to identify deals posts rather than rigid URL patterns.
  */
 
 import * as cheerio from 'cheerio';
@@ -8,68 +9,86 @@ import * as cheerio from 'cheerio';
 const COCOWEST_URL = 'https://cocowest.ca/';
 
 /**
- * Parses date range from post title/URL.
- * @param {string} text - Post title or URL containing dates
- * @returns {{ validFrom: string, validTo: string } | null} ISO date strings or null
+ * Month name lookup supporting both full and abbreviated names.
+ */
+const MONTH_NAMES = {
+  january: 0, jan: 0, february: 1, feb: 1, march: 2, mar: 2,
+  april: 3, apr: 3, may: 4, june: 5, jun: 5, july: 6, jul: 6,
+  august: 7, aug: 7, september: 8, sep: 8, sept: 8,
+  october: 9, oct: 9, november: 10, nov: 10, december: 11, dec: 11
+};
+
+/**
+ * Normalizes a month name to its full capitalized form.
+ * @param {string} month - Month name (full or abbreviated)
+ * @returns {string} Full month name capitalized
+ */
+function normalizeMonthName(month) {
+  const fullNames = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+  const monthNum = MONTH_NAMES[month.toLowerCase()];
+  return monthNum !== undefined ? fullNames[monthNum] : month;
+}
+
+/**
+ * Parses date range from text using flexible patterns.
+ * Looks for common date range formats in titles, URLs, or content.
+ * @param {string} text - Text containing potential date range
+ * @returns {{ validFrom: string, validTo: string, displayDates: string } | null}
  */
 function parseDateRange(text) {
-  const monthNames = {
-    january: 0, jan: 0, february: 1, feb: 1, march: 2, mar: 2,
-    april: 3, apr: 3, may: 4, june: 5, jun: 5, july: 6, jul: 6,
-    august: 7, aug: 7, september: 8, sep: 8, sept: 8,
-    october: 9, oct: 9, november: 10, nov: 10, december: 11, dec: 11
-  };
-  // Match both full and abbreviated month names
+  // Flexible month pattern (full or abbreviated)
   const monthPattern = '(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept?|october|oct|november|nov|december|dec)';
 
-  // Cross-month patterns (must check before same-month patterns)
+  // Cross-month patterns: "January 26 – February 1, 2026" or "january-26-feb-1-2026"
   const crossMonthPatterns = [
-    // Title format: "January 26 – February 1, 2026" (em dash, en dash, or hyphen)
+    // Title format with various separators (em dash, en dash, hyphen, "to")
     new RegExp(`${monthPattern}\\s+(\\d{1,2})\\s*[–—-]\\s*${monthPattern}\\s+(\\d{1,2}),?\\s*(\\d{4})`, 'i'),
-    // URL format: "for-january-26-february-1-2026"
-    new RegExp(`for-${monthPattern}-(\\d{1,2})-${monthPattern}-(\\d{1,2})-(\\d{4})`, 'i'),
+    new RegExp(`${monthPattern}\\s+(\\d{1,2})\\s+to\\s+${monthPattern}\\s+(\\d{1,2}),?\\s*(\\d{4})`, 'i'),
+    // URL format: "january-26-february-1-2026" or "january-26-feb-1-2026"
+    new RegExp(`${monthPattern}[\\s-]+(\\d{1,2})[\\s-]+${monthPattern}[\\s-]+(\\d{1,2})[\\s-]+(\\d{4})`, 'i'),
   ];
 
   for (const pattern of crossMonthPatterns) {
     const match = text.match(pattern);
     if (match) {
-      const startMonth = monthNames[match[1].toLowerCase()];
+      const startMonth = MONTH_NAMES[match[1].toLowerCase()];
       const startDay = parseInt(match[2]);
-      const endMonth = monthNames[match[3].toLowerCase()];
+      const endMonth = MONTH_NAMES[match[3].toLowerCase()];
       const endDay = parseInt(match[4]);
       const year = parseInt(match[5]);
 
+      if (startMonth === undefined || endMonth === undefined) continue;
+
       const validFrom = new Date(year, startMonth, startDay);
-      // Handle year rollover (December → January)
       const endYear = endMonth < startMonth ? year + 1 : year;
       const validTo = new Date(endYear, endMonth, endDay, 23, 59, 59);
-
-      const startMonthName = match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
-      const endMonthName = match[3].charAt(0).toUpperCase() + match[3].slice(1).toLowerCase();
 
       return {
         validFrom: validFrom.toISOString().split('T')[0],
         validTo: validTo.toISOString().split('T')[0],
-        displayDates: `${startMonthName} ${startDay} - ${endMonthName} ${endDay}, ${endYear}`
+        displayDates: `${normalizeMonthName(match[1])} ${startDay} - ${normalizeMonthName(match[3])} ${endDay}, ${endYear}`
       };
     }
   }
 
-  // Same-month patterns
+  // Same-month patterns: "January 19-25, 2026" or "january-19-25-2026"
   const sameMonthPatterns = [
-    // Title format: "January 19-25, 2026"
-    new RegExp(`${monthPattern}\\s+(\\d{1,2})-(\\d{1,2}),?\\s*(\\d{4})`, 'i'),
-    // URL format: "january-19-25-2026"
-    new RegExp(`for-${monthPattern}-(\\d{1,2})-(\\d{1,2})-(\\d{4})`, 'i'),
+    new RegExp(`${monthPattern}\\s+(\\d{1,2})\\s*[–—-]\\s*(\\d{1,2}),?\\s*(\\d{4})`, 'i'),
+    new RegExp(`${monthPattern}[\\s-]+(\\d{1,2})[\\s-]+(\\d{1,2})[\\s-]+(\\d{4})`, 'i'),
   ];
 
   for (const pattern of sameMonthPatterns) {
     const match = text.match(pattern);
     if (match) {
-      const month = monthNames[match[1].toLowerCase()];
+      const month = MONTH_NAMES[match[1].toLowerCase()];
       const startDay = parseInt(match[2]);
       const endDay = parseInt(match[3]);
       const year = parseInt(match[4]);
+
+      if (month === undefined) continue;
 
       const validFrom = new Date(year, month, startDay);
       const validTo = new Date(year, month, endDay, 23, 59, 59);
@@ -77,51 +96,99 @@ function parseDateRange(text) {
       return {
         validFrom: validFrom.toISOString().split('T')[0],
         validTo: validTo.toISOString().split('T')[0],
-        displayDates: `${match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase()} ${startDay}-${endDay}, ${year}`
+        displayDates: `${normalizeMonthName(match[1])} ${startDay}-${endDay}, ${year}`
       };
     }
   }
+
   return null;
 }
 
 /**
- * Finds all valid sales posts from the homepage.
- * @param {CheerioAPI} $ - Cheerio instance of homepage
- * @returns {Array<{url: string, title: string, validFrom: string, validTo: string, displayDates: string}>}
+ * Checks if a URL looks like it could be a sales/deals post.
+ * Uses broad keyword matching rather than exact patterns.
+ * @param {string} url - URL to check
+ * @returns {boolean}
  */
-function findSalesPosts($) {
+function isPotentialSalesUrl(url) {
+  const lowerUrl = url.toLowerCase();
+
+  // Must be a cocowest.ca post URL
+  if (!lowerUrl.includes('cocowest.ca/')) return false;
+
+  // Look for sales-related keywords
+  const salesKeywords = ['sale', 'flyer', 'deals', 'update', 'savings'];
+  return salesKeywords.some(keyword => lowerUrl.includes(keyword));
+}
+
+/**
+ * Finds all potential sales post URLs from the homepage.
+ * Uses broad keyword matching - verification happens after fetching content.
+ * @param {CheerioAPI} $ - Cheerio instance of homepage
+ * @returns {Array<{url: string, title: string}>}
+ */
+function findPotentialSalesPosts($) {
   const posts = [];
   const seen = new Set();
 
-  // Find all post links that look like sales posts
   $('a').each((i, el) => {
     const href = $(el).attr('href') || '';
     const text = $(el).text() || '';
 
-    // Skip if already seen this URL
     if (seen.has(href)) return;
-
-    // Must be a sales post (flyer or weekend update)
-    const isSalesPost =
-      href.includes('costco-flyer-costco-sale-items') ||
-      href.includes('costco-sale-items-for') ||
-      href.includes('weekend-update-costco-sale-items');
-
-    if (!isSalesPost) return;
-
-    // Try to parse date range from URL or text
-    const dateRange = parseDateRange(href) || parseDateRange(text);
-    if (!dateRange) return;
+    if (!isPotentialSalesUrl(href)) return;
 
     seen.add(href);
     posts.push({
       url: href,
-      title: text.trim(),
-      ...dateRange
+      title: text.trim()
     });
   });
 
   return posts;
+}
+
+/**
+ * Checks if page content contains deal patterns.
+ * A deals page has product codes (6-7 digits) followed by prices and "INSTANT SAVINGS".
+ * @param {string} text - Page text content
+ * @returns {boolean}
+ */
+function hasDealContent(text) {
+  // Pattern: product code + price pattern with INSTANT SAVINGS
+  const dealPattern = /\d{6,7}\s+[A-Z].*?\$\d+\.?\d*\s+INSTANT SAVINGS/gi;
+  const matches = text.match(dealPattern) || [];
+
+  // Require at least 5 deals to consider it a deals page
+  return matches.length >= 5;
+}
+
+/**
+ * Extracts date range from a page's title or content.
+ * Tries multiple sources: og:title, page title, h1, entry title, URL.
+ * @param {CheerioAPI} $ - Cheerio instance
+ * @param {string} url - Page URL as fallback
+ * @returns {{ validFrom: string, validTo: string, displayDates: string } | null}
+ */
+function extractDateRangeFromPage($, url) {
+  // Try various sources for the date
+  const sources = [
+    $('meta[property="og:title"]').attr('content'),
+    $('title').text(),
+    $('h1.entry-title').text(),
+    $('h1').first().text(),
+    $('.entry-title').first().text(),
+    url
+  ];
+
+  for (const source of sources) {
+    if (source) {
+      const dateRange = parseDateRange(source);
+      if (dateRange) return dateRange;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -136,8 +203,9 @@ function filterValidPosts(posts) {
 
 /**
  * Fetches and parses deals from Cocowest.
- * Scrapes multiple posts and returns all deals with validity dates.
- * @returns {Promise<{deals: Array<Deal>, posts: Array}>} Deals with validity dates
+ * Uses content-based detection: finds potential posts, verifies they have deals,
+ * then extracts dates from the verified pages.
+ * @returns {Promise<{deals: Array<Deal>, posts: Array, flyerDates: string}>}
  */
 export async function scrapeCocowest() {
   // Fetch homepage
@@ -145,44 +213,69 @@ export async function scrapeCocowest() {
   const html = await response.text();
   const $ = cheerio.load(html);
 
-  // Find all sales posts
-  const allPosts = findSalesPosts($);
-  console.log(`Found ${allPosts.length} sales posts on homepage`);
+  // Find potential sales posts (broad keyword match)
+  const potentialPosts = findPotentialSalesPosts($);
+  console.log(`Found ${potentialPosts.length} potential sales posts`);
 
-  // Filter to only currently valid posts
-  const validPosts = filterValidPosts(allPosts);
-  console.log(`${validPosts.length} posts are currently valid`);
+  // Verify each post has deal content and extract dates
+  const verifiedPosts = [];
+  for (const post of potentialPosts) {
+    try {
+      const postResponse = await fetch(post.url);
+      const postHtml = await postResponse.text();
+      const post$ = cheerio.load(postHtml);
+      const text = post$('.entry-content').text() || post$('article').text();
 
-  if (validPosts.length === 0) {
-    console.log('No valid posts found. Using most recent post as fallback.');
-    if (allPosts.length > 0) {
-      validPosts.push(allPosts[0]);
+      // Skip if no deal content
+      if (!hasDealContent(text)) {
+        continue;
+      }
+
+      // Extract date range from the page
+      const dateRange = extractDateRangeFromPage(post$, post.url);
+      if (!dateRange) {
+        console.log(`  Skipping (no date found): ${post.url}`);
+        continue;
+      }
+
+      verifiedPosts.push({
+        ...post,
+        ...dateRange,
+        html: postHtml
+      });
+      console.log(`  Verified: ${dateRange.displayDates}`);
+    } catch (error) {
+      console.error(`  Error checking post: ${error.message}`);
     }
   }
 
-  // Scrape each valid post
+  console.log(`${verifiedPosts.length} posts verified with deal content`);
+
+  // Filter to only currently valid posts
+  const validPosts = filterValidPosts(verifiedPosts);
+  console.log(`${validPosts.length} posts are currently valid`);
+
+  // Fallback to most recent if none valid
+  if (validPosts.length === 0 && verifiedPosts.length > 0) {
+    console.log('No valid posts found. Using most recent post as fallback.');
+    validPosts.push(verifiedPosts[0]);
+  }
+
+  // Parse deals from each valid post
   const allDeals = [];
   for (const post of validPosts) {
     console.log(`\nScraping: ${post.displayDates}`);
     console.log(`  URL: ${post.url}`);
 
-    try {
-      const postResponse = await fetch(post.url);
-      const postHtml = await postResponse.text();
-      const post$ = cheerio.load(postHtml);
+    const post$ = cheerio.load(post.html);
+    const deals = parseDealsFromPage(post$, post.url);
+    console.log(`  Found ${deals.length} deals`);
 
-      const deals = parseDealsFromPage(post$, post.url);
-      console.log(`  Found ${deals.length} deals`);
-
-      // Tag each deal with validity dates
-      for (const deal of deals) {
-        deal.valid_from = post.validFrom;
-        deal.valid_to = post.validTo;
-        deal.source_post = post.displayDates;
-        allDeals.push(deal);
-      }
-    } catch (error) {
-      console.error(`  Error scraping post: ${error.message}`);
+    for (const deal of deals) {
+      deal.valid_from = post.validFrom;
+      deal.valid_to = post.validTo;
+      deal.source_post = post.displayDates;
+      allDeals.push(deal);
     }
   }
 
@@ -192,7 +285,7 @@ export async function scrapeCocowest() {
 
   return {
     deals: deduped,
-    posts: validPosts,
+    posts: validPosts.map(p => ({ url: p.url, displayDates: p.displayDates, validFrom: p.validFrom, validTo: p.validTo })),
     flyerDates: validPosts.map(p => p.displayDates).join(' + ')
   };
 }
@@ -218,7 +311,8 @@ function deduplicateDeals(deals) {
 }
 
 /**
- * Parses deals from a Cocowest page
+ * Parses deals from a Cocowest page.
+ * Looks for the pattern: product_code PRODUCT NAME ($X INSTANT SAVINGS...) $price
  * @param {CheerioAPI} $ - Cheerio instance
  * @param {string} source - Source URL for logging
  * @returns {Array<Deal>}
@@ -232,23 +326,19 @@ function parseDealsFromPage($, source) {
     const alt = $(el).attr('alt') || '';
     const imageSrc = $(el).attr('data-src') || $(el).attr('data-lazy-src') || $(el).attr('src') || '';
 
-    // Extract product code from alt text (e.g., "1627198 DURACELL...")
     const codeMatch = alt.match(/^(\d{6,7})\s/);
     if (codeMatch && imageSrc && !imageSrc.startsWith('data:')) {
       imageMap[codeMatch[1]] = imageSrc;
     }
   });
 
-  // Get the main content text
   const text = $('.entry-content').text() || $('article').text();
-
   if (!text) {
     console.log('No content found on page');
     return deals;
   }
 
-  // Cocowest format: "1627198 DURACELL POWER BOOST AAA BATTERIES PACK OF 40 ($6.00 INSTANT SAVINGS EXPIRES ON 2026-01-25) $19.99"
-  // Pattern: {product_code} {PRODUCT NAME} (${savings} INSTANT SAVINGS EXPIRES ON {date}) ${sale_price}
+  // Pattern: {product_code} {PRODUCT NAME} (${savings} INSTANT SAVINGS...) ${sale_price}
   const dealPattern = /(\d{6,7})\s+([A-Z][A-Z0-9\s&\-\+\/,'\.x×]+?)\s+\(\$(\d+\.?\d*)\s+INSTANT SAVINGS[^)]+\)\s+\$(\d+\.?\d*)/gi;
 
   let match;
@@ -258,10 +348,7 @@ function parseDealsFromPage($, source) {
     const savingsAmount = parseFloat(match[3]);
     const salePrice = parseFloat(match[4]);
 
-    // Skip if product name is too short
-    if (productName.length < 5) {
-      continue;
-    }
+    if (productName.length < 5) continue;
 
     const regularPrice = salePrice + savingsAmount;
     const savingsPercent = (savingsAmount / regularPrice) * 100;
@@ -283,7 +370,7 @@ function parseDealsFromPage($, source) {
 }
 
 /**
- * Simple product categorization based on keywords
+ * Categorizes a product based on keywords in its name.
  * @param {string} productName
  * @returns {string}
  */
