@@ -36,18 +36,14 @@ function cleanCartersDeals(rawDeals: RawDeal[], pulledDate: string) {
     : new Date().toISOString();
 
   return rawDeals.map(product => {
-    let savingsPercent = 0;
-    if (product.discount) {
-      const match = product.discount.match(/(\d+)%/);
-      if (match) savingsPercent = parseInt(match[1], 10);
-    }
-
     const regularPrice = Number(product.regular_price) || 0;
     const salePrice = Number(product.sale_price) || 0;
     const savingsAmount = Math.round((regularPrice - salePrice) * 100) / 100;
 
-    if (!savingsPercent && regularPrice > 0) {
-      // Keep 2 decimal places for accurate sorting (display as whole number)
+    // Always calculate from prices for accurate decimal sorting
+    // Keep 2 decimal places (display as whole number in UI)
+    let savingsPercent = 0;
+    if (regularPrice > 0) {
       savingsPercent = Math.round((savingsAmount / regularPrice) * 10000) / 100;
     }
 
