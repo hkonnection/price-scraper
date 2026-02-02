@@ -14,10 +14,13 @@ const COCOWEST_URL = 'https://cocowest.ca/';
  */
 function parseDateRange(text) {
   const monthNames = {
-    january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
-    july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
+    january: 0, jan: 0, february: 1, feb: 1, march: 2, mar: 2,
+    april: 3, apr: 3, may: 4, june: 5, jun: 5, july: 6, jul: 6,
+    august: 7, aug: 7, september: 8, sep: 8, sept: 8,
+    october: 9, oct: 9, november: 10, nov: 10, december: 11, dec: 11
   };
-  const monthPattern = '(january|february|march|april|may|june|july|august|september|october|november|december)';
+  // Match both full and abbreviated month names
+  const monthPattern = '(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept?|october|oct|november|nov|december|dec)';
 
   // Cross-month patterns (must check before same-month patterns)
   const crossMonthPatterns = [
