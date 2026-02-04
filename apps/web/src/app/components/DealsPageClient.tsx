@@ -132,7 +132,7 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
                 Import Deals
               </button>
             )}
-            {showRefreshButton && <RefreshButton />}
+            {showRefreshButton && <RefreshButton retailer={selectedRetailer} />}
           </div>
         </div>
         {flyerDates && selectedRetailer === 'costco' && (

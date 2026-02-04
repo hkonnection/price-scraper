@@ -3,10 +3,20 @@ import { getRequestContext } from '@cloudflare/next-on-pages';
 export const runtime = 'edge';
 
 /**
- * POST /api/trigger-scrape
- * Triggers the GitHub Actions scraper workflow.
+ * Maps retailer slugs to their GitHub Actions workflow files.
  */
-export async function POST() {
+const RETAILER_WORKFLOWS: Record<string, string> = {
+  costco: 'scrape.yml',
+  westcoastkids: 'scrape-westcoastkids.yml',
+};
+
+/**
+ * POST /api/trigger-scrape
+ * Triggers the GitHub Actions scraper workflow for a specific retailer.
+ *
+ * @param request - Request with optional JSON body { retailer: string }
+ */
+export async function POST(request: Request) {
   try {
     const { env } = getRequestContext();
     const token = (env as { GITHUB_TOKEN?: string }).GITHUB_TOKEN;
@@ -18,8 +28,27 @@ export async function POST() {
       );
     }
 
+    // Get retailer from request body, default to costco
+    let retailer = 'costco';
+    try {
+      const body = await request.json() as { retailer?: string };
+      if (body.retailer) {
+        retailer = body.retailer;
+      }
+    } catch {
+      // No body or invalid JSON, use default
+    }
+
+    const workflowFile = RETAILER_WORKFLOWS[retailer];
+    if (!workflowFile) {
+      return Response.json(
+        { error: `No workflow configured for retailer: ${retailer}` },
+        { status: 400 }
+      );
+    }
+
     const response = await fetch(
-      'https://api.github.com/repos/hkonnection/price-scraper/actions/workflows/scrape.yml/dispatches',
+      `https://api.github.com/repos/hkonnection/price-scraper/actions/workflows/${workflowFile}/dispatches`,
       {
         method: 'POST',
         headers: {

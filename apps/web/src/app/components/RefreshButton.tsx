@@ -2,11 +2,17 @@
 
 import { useState } from 'react';
 
+interface RefreshButtonProps {
+  retailer?: string;
+}
+
 /**
- * Button to trigger the scraper workflow.
+ * Button to trigger the scraper workflow for a specific retailer.
  * Shows loading state while triggering.
+ *
+ * @param retailer - Retailer slug (e.g., 'costco', 'westcoastkids')
  */
-export default function RefreshButton() {
+export default function RefreshButton({ retailer = 'costco' }: RefreshButtonProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -15,7 +21,11 @@ export default function RefreshButton() {
     setMessage(null);
 
     try {
-      const response = await fetch('/api/trigger-scrape', { method: 'POST' });
+      const response = await fetch('/api/trigger-scrape', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ retailer }),
+      });
       const data = await response.json() as { error?: string; message?: string };
 
       if (response.ok) {
