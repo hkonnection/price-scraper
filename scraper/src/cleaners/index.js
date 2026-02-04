@@ -11,6 +11,7 @@ export async function getCleaner(retailerSlug) {
     carters: () => import('./carters.js'),
     costco: () => import('./costco.js'),
     westcoastkids: () => import('./westcoastkids.js'),
+    toycompany: () => import('./toycompany.js'),
   };
 
   const loader = cleaners[retailerSlug];
