@@ -53,6 +53,8 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [selectedPromoType, setSelectedPromoType] = useState('all');
   const [showImportModal, setShowImportModal] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(500);
 
   // Sync URL when retailer changes
   useEffect(() => {
@@ -73,6 +75,19 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
       return true;
     });
   }, [deals, selectedRetailer, selectedCategory, selectedPromoType]);
+
+  // Pagination calculations
+  const totalPages = pageSize === 0 ? 1 : Math.ceil(filteredDeals.length / pageSize);
+  const paginatedDeals = useMemo(() => {
+    if (pageSize === 0) return filteredDeals; // "All" option
+    const start = (currentPage - 1) * pageSize;
+    return filteredDeals.slice(start, start + pageSize);
+  }, [filteredDeals, currentPage, pageSize]);
+
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [selectedRetailer, selectedCategory, selectedPromoType, pageSize]);
 
   const categories = useMemo(() => {
     const relevant = selectedRetailer === 'all' ? deals : deals.filter(d => d.retailer_slug === selectedRetailer);
@@ -205,8 +220,45 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
         </div>
       </div>
 
+      <div className="pagination-controls">
+        <div className="pagination-info">
+          Showing {paginatedDeals.length} of {filteredDeals.length} deals
+          {pageSize > 0 && ` (Page ${currentPage} of ${totalPages})`}
+        </div>
+        <div className="pagination-actions">
+          <label htmlFor="page-size">Per page:</label>
+          <select
+            id="page-size"
+            value={pageSize}
+            onChange={(e) => setPageSize(Number(e.target.value))}
+          >
+            <option value={500}>500</option>
+            <option value={1000}>1000</option>
+            <option value={0}>All</option>
+          </select>
+          {pageSize > 0 && (
+            <>
+              <button
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                disabled={currentPage === 1}
+                className="pagination-button"
+              >
+                ← Prev
+              </button>
+              <button
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                disabled={currentPage === totalPages}
+                className="pagination-button"
+              >
+                Next →
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
       <DealsTable
-        deals={filteredDeals}
+        deals={paginatedDeals}
         lastUpdated={lastUpdated}
         showRetailer={selectedRetailer === 'all'}
       />
