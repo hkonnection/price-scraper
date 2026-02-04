@@ -5,10 +5,13 @@
   "type": "module",
   "scripts": {
     "scrape": "node --experimental-vm-modules src/index.js",
-    "scrape:dry": "node --experimental-vm-modules src/index.js --dry-run"
+    "scrape:dry": "node --experimental-vm-modules src/index.js --dry-run",
+    "scrape:westcoastkids": "node --experimental-vm-modules src/westcoastkids-index.js",
+    "scrape:westcoastkids:dry": "node --experimental-vm-modules src/westcoastkids-index.js --dry-run"
   },
   "dependencies": {
     "cheerio": "^1.0.0-rc.12",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "playwright": "^1.41.0"
   }
 }
