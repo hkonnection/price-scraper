@@ -92,7 +92,7 @@ export async function pushToD1(deals, retailerSlug = 'costco', flyerDates = null
 
     // Insert new deals with scrape_id and validity dates
     const insertStatements = deals.map(deal => `
-      INSERT INTO deals (retailer_id, scrape_id, product_code, product_name, brand, regular_price, sale_price, savings_amount, savings_percent, category, promo_type, image_url, valid_from, valid_to, scraped_at)
+      INSERT INTO deals (retailer_id, scrape_id, product_code, product_name, brand, regular_price, sale_price, savings_amount, savings_percent, category, promo_type, image_url, product_url, valid_from, valid_to, scraped_at)
       VALUES (
         ${retailerId},
         ${scrapeId},
@@ -106,6 +106,7 @@ export async function pushToD1(deals, retailerSlug = 'costco', flyerDates = null
         '${escapeSql(deal.category)}',
         ${deal.promo_type ? `'${escapeSql(deal.promo_type)}'` : 'NULL'},
         '${escapeSql(deal.image_url || '')}',
+        ${deal.product_url ? `'${escapeSql(deal.product_url)}'` : 'NULL'},
         ${deal.valid_from ? `'${deal.valid_from}'` : 'NULL'},
         ${deal.valid_to ? `'${deal.valid_to}'` : 'NULL'},
         '${deal.scraped_at}'

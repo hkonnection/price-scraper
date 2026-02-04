@@ -143,7 +143,7 @@ async function extractDealsFromPage(page) {
       // Only include items with valid pricing data
       if (productName && salePrice && originalPrice && salePrice < originalPrice) {
         const savingsAmount = Math.round((originalPrice - salePrice) * 100) / 100;
-        const savingsPercent = Math.round((savingsAmount / originalPrice) * 1000) / 10;
+        const savingsPercent = Math.round((savingsAmount / originalPrice) * 10000) / 100;
 
         deals.push({
           product_code: productId,
