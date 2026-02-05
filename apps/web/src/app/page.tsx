@@ -110,7 +110,8 @@ async function getData(): Promise<{
           AND (d.valid_to IS NULL OR d.valid_to >= ?)
           AND d.regular_price > 0
           AND d.savings_percent > 0
-        ORDER BY COALESCE(d.in_stock, 1) DESC, d.savings_percent DESC
+          AND COALESCE(d.in_stock, 1) = 1
+        ORDER BY d.savings_percent DESC
         LIMIT 2000
       `)
       .bind(today, today)

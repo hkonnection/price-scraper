@@ -78,11 +78,11 @@ function transformProduct(product) {
   const variant = product.variants?.[0];
   if (!variant) return null;
 
-  const salePrice = parseFloat(variant.price);
-  if (!salePrice || salePrice <= 0) return null;
+  const regularPrice = parseFloat(variant.price);
+  if (!regularPrice || regularPrice <= 0) return null;
 
-  // Hardcoded 50% discount - calculate original price
-  const regularPrice = Math.round(salePrice * 2 * 100) / 100;
+  // 50% discount applied at checkout - API price is the original price
+  const salePrice = Math.round(regularPrice * 0.5 * 100) / 100;
   const savingsAmount = Math.round((regularPrice - salePrice) * 100) / 100;
   const savingsPercent = 50; // Hardcoded
 
