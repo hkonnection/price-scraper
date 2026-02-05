@@ -9,6 +9,6 @@ export function clean(deals) {
   return deals.map((deal) => ({
     ...deal,
     promo_type: 'We Made Too Much',
-    brand: 'lululemon',
+    brand: 'Lululemon',
   }));
 }

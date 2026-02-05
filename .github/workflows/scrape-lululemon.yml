@@ -1,4 +1,4 @@
-name: Scrape lululemon
+name: Scrape Lululemon
 
 on:
   # Manual trigger
@@ -38,7 +38,7 @@ jobs:
         run: npx playwright install chrome --with-deps
         working-directory: scraper
 
-      - name: Run lululemon scraper
+      - name: Run Lululemon scraper
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -52,4 +52,4 @@ jobs:
         working-directory: scraper
 
       - name: Summary
-        run: echo "lululemon scrape completed at $(date)"
+        run: echo "Lululemon scrape completed at $(date)"

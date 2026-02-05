@@ -11,7 +11,7 @@ import { getCleaner } from './cleaners/index.js';
 const DRY_RUN = process.argv.includes('--dry-run');
 
 async function main() {
-  console.log('Starting lululemon Canada WMTM scraper...');
+  console.log('Starting Lululemon Canada WMTM scraper...');
   console.log(`Mode: ${DRY_RUN ? 'DRY RUN (no database writes)' : 'LIVE'}`);
 
   try {

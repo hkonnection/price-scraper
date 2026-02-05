@@ -241,7 +241,7 @@ function transformProduct(product, sectionName) {
   return {
     product_code: product.productId || '',
     product_name: product.displayName,
-    brand: 'lululemon',
+    brand: 'Lululemon',
     regular_price: regularPrice,
     sale_price: salePrice,
     savings_amount: savingsAmount,
