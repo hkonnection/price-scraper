@@ -14,6 +14,8 @@ export async function getCleaner(retailerSlug) {
     toycompany: () => import('./toycompany.js'),
     wholefoods: () => import('./wholefoods.js'),
     gourmetwarehouse: () => import('./gourmetwarehouse.js'),
+    lululemon: () => import('./lululemon.js'),
+    indigo: () => import('./indigo.js'),
     nike: () => import('./nike.js'),
   };
 
