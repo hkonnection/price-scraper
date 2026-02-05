@@ -9,7 +9,9 @@
     "scrape:westcoastkids": "node --experimental-vm-modules src/westcoastkids-index.js",
     "scrape:westcoastkids:dry": "node --experimental-vm-modules src/westcoastkids-index.js --dry-run",
     "scrape:toycompany": "node --experimental-vm-modules src/toycompany-index.js",
-    "scrape:toycompany:dry": "node --experimental-vm-modules src/toycompany-index.js --dry-run"
+    "scrape:toycompany:dry": "node --experimental-vm-modules src/toycompany-index.js --dry-run",
+    "scrape:wholefoods": "node --experimental-vm-modules src/wholefoods-index.js",
+    "scrape:wholefoods:dry": "node --experimental-vm-modules src/wholefoods-index.js --dry-run"
   },
   "dependencies": {
     "cheerio": "^1.0.0-rc.12",
