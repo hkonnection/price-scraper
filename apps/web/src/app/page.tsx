@@ -34,10 +34,15 @@ const MOCK_DEALS: Deal[] = [
 ];
 
 /**
- * Fetches all active retailers and their current deals from D1.
+ * Fetches active retailers and current deals from D1.
+ * When a specific retailer is selected, fetches only that retailer's deals (no LIMIT).
+ * For "all" view, applies LIMIT 2000 to stay within Worker resource limits.
  * Falls back to mock data for local development.
+ *
+ * @param {string} retailerSlug - Retailer slug to filter by, or 'all' for all retailers
+ * @returns {Promise<{ deals: Deal[], retailers: Retailer[], retailerDates: Record<string, string>, flyerDates: string | null }>}
  */
-async function getData(): Promise<{
+async function getData(retailerSlug: string): Promise<{
   deals: Deal[];
   retailers: Retailer[];
   retailerDates: Record<string, string>;
@@ -94,28 +99,47 @@ async function getData(): Promise<{
 
     const flyerDates = flyerResult?.flyer_dates || null;
 
-    // Get all current deals with retailer info
-    // Filter out invalid deals (no regular price or no savings)
-    // Sort: in-stock first, then by savings_percent descending
+    // Get current deals with retailer info
+    // When a specific retailer is selected, filter server-side (no LIMIT needed)
+    // For "all" view, apply LIMIT 2000 to stay within Worker resource limits
     const today = new Date().toISOString().split('T')[0];
-    const dealsResult = await db
-      .prepare(`
-        SELECT d.id, d.product_code, d.product_name, d.brand, d.regular_price, d.sale_price,
-               d.savings_amount, d.savings_percent, d.category, d.promo_type, d.image_url,
-               d.product_url, d.scraped_at, COALESCE(d.in_stock, 1) as in_stock,
-               r.slug as retailer_slug, r.name as retailer_name
-        FROM deals d
-        JOIN retailers r ON d.retailer_id = r.id
-        WHERE (d.valid_from IS NULL OR d.valid_from <= ?)
-          AND (d.valid_to IS NULL OR d.valid_to >= ?)
-          AND d.regular_price > 0
-          AND d.savings_percent > 0
-          AND COALESCE(d.in_stock, 1) = 1
-        ORDER BY d.savings_percent DESC
-        LIMIT 2000
-      `)
-      .bind(today, today)
-      .all<DealRow>();
+    const isAllRetailers = retailerSlug === 'all';
+
+    const dealsQuery = isAllRetailers
+      ? db.prepare(`
+          SELECT d.id, d.product_code, d.product_name, d.brand, d.regular_price, d.sale_price,
+                 d.savings_amount, d.savings_percent, d.category, d.promo_type, d.image_url,
+                 d.product_url, d.scraped_at, COALESCE(d.in_stock, 1) as in_stock,
+                 r.slug as retailer_slug, r.name as retailer_name
+          FROM deals d
+          JOIN retailers r ON d.retailer_id = r.id
+          WHERE r.is_active = 1
+            AND (d.valid_from IS NULL OR d.valid_from <= ?)
+            AND (d.valid_to IS NULL OR d.valid_to >= ?)
+            AND d.regular_price > 0
+            AND d.savings_percent > 0
+            AND COALESCE(d.in_stock, 1) = 1
+          ORDER BY d.savings_percent DESC
+          LIMIT 2000
+        `).bind(today, today)
+      : db.prepare(`
+          SELECT d.id, d.product_code, d.product_name, d.brand, d.regular_price, d.sale_price,
+                 d.savings_amount, d.savings_percent, d.category, d.promo_type, d.image_url,
+                 d.product_url, d.scraped_at, COALESCE(d.in_stock, 1) as in_stock,
+                 r.slug as retailer_slug, r.name as retailer_name
+          FROM deals d
+          JOIN retailers r ON d.retailer_id = r.id
+          WHERE r.is_active = 1
+            AND r.slug = ?
+            AND (d.valid_from IS NULL OR d.valid_from <= ?)
+            AND (d.valid_to IS NULL OR d.valid_to >= ?)
+            AND d.regular_price > 0
+            AND d.savings_percent > 0
+            AND COALESCE(d.in_stock, 1) = 1
+          ORDER BY d.savings_percent DESC
+        `).bind(retailerSlug, today, today);
+
+    const dealsResult = await dealsQuery.all<DealRow>();
 
     return {
       deals: dealsResult.results || [],
@@ -134,8 +158,14 @@ async function getData(): Promise<{
   }
 }
 
-export default async function Home() {
-  const { deals, retailers, retailerDates, flyerDates } = await getData();
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ retailer?: string }>;
+}) {
+  const params = await searchParams;
+  const retailerSlug = params.retailer || 'costco';
+  const { deals, retailers, retailerDates, flyerDates } = await getData(retailerSlug);
 
   return (
     <main className="container">
