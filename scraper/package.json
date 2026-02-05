@@ -15,7 +15,9 @@
     "scrape:gourmetwarehouse": "node --experimental-vm-modules src/gourmetwarehouse-index.js",
     "scrape:gourmetwarehouse:dry": "node --experimental-vm-modules src/gourmetwarehouse-index.js --dry-run",
     "scrape:lululemon": "node --experimental-vm-modules src/lululemon-index.js",
-    "scrape:lululemon:dry": "node --experimental-vm-modules src/lululemon-index.js --dry-run"
+    "scrape:lululemon:dry": "node --experimental-vm-modules src/lululemon-index.js --dry-run",
+    "scrape:indigo": "node --experimental-vm-modules src/indigo-index.js",
+    "scrape:indigo:dry": "node --experimental-vm-modules src/indigo-index.js --dry-run"
   },
   "dependencies": {
     "cheerio": "^1.0.0-rc.12",

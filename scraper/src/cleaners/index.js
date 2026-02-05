@@ -15,6 +15,7 @@ export async function getCleaner(retailerSlug) {
     wholefoods: () => import('./wholefoods.js'),
     gourmetwarehouse: () => import('./gourmetwarehouse.js'),
     lululemon: () => import('./lululemon.js'),
+    indigo: () => import('./indigo.js'),
   };
 
   const loader = cleaners[retailerSlug];
