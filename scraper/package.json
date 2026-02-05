@@ -19,7 +19,9 @@
     "scrape:indigo": "node --experimental-vm-modules src/indigo-index.js",
     "scrape:indigo:dry": "node --experimental-vm-modules src/indigo-index.js --dry-run",
     "scrape:nike": "node --experimental-vm-modules src/nike-index.js",
-    "scrape:nike:dry": "node --experimental-vm-modules src/nike-index.js --dry-run"
+    "scrape:nike:dry": "node --experimental-vm-modules src/nike-index.js --dry-run",
+    "scrape:barrys": "node --experimental-vm-modules src/barrys-index.js",
+    "scrape:barrys:dry": "node --experimental-vm-modules src/barrys-index.js --dry-run"
   },
   "dependencies": {
     "cheerio": "^1.0.0-rc.12",
