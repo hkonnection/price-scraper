@@ -13,6 +13,7 @@ export async function getCleaner(retailerSlug) {
     westcoastkids: () => import('./westcoastkids.js'),
     toycompany: () => import('./toycompany.js'),
     wholefoods: () => import('./wholefoods.js'),
+    gourmetwarehouse: () => import('./gourmetwarehouse.js'),
   };
 
   const loader = cleaners[retailerSlug];
