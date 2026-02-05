@@ -1,0 +1,50 @@
+name: Scrape Barry's
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run without writing to database'
+        required: false
+        default: 'false'
+        type: boolean
+
+  # Auto-scrape on schedule (weekly)
+  schedule:
+    - cron: '0 16 * * 1'   # Monday 8am PST (4pm UTC)
+
+  repository_dispatch:
+    types: [scrape-barrys]
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install scraper dependencies
+        run: npm install --workspace=scraper --legacy-peer-deps
+
+      - name: Run Barry's scraper
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run scrape:barrys:dry
+          else
+            npm run scrape:barrys
+          fi
+        working-directory: scraper
+
+      - name: Summary
+        run: echo "Barry's scrape completed at $(date)"

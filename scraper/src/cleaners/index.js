@@ -17,6 +17,7 @@ export async function getCleaner(retailerSlug) {
     lululemon: () => import('./lululemon.js'),
     indigo: () => import('./indigo.js'),
     nike: () => import('./nike.js'),
+    barrys: () => import('./barrys.js'),
   };
 
   const loader = cleaners[retailerSlug];
