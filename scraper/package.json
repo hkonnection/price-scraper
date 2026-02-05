@@ -11,7 +11,9 @@
     "scrape:toycompany": "node --experimental-vm-modules src/toycompany-index.js",
     "scrape:toycompany:dry": "node --experimental-vm-modules src/toycompany-index.js --dry-run",
     "scrape:wholefoods": "node --experimental-vm-modules src/wholefoods-index.js",
-    "scrape:wholefoods:dry": "node --experimental-vm-modules src/wholefoods-index.js --dry-run"
+    "scrape:wholefoods:dry": "node --experimental-vm-modules src/wholefoods-index.js --dry-run",
+    "scrape:gourmetwarehouse": "node --experimental-vm-modules src/gourmetwarehouse-index.js",
+    "scrape:gourmetwarehouse:dry": "node --experimental-vm-modules src/gourmetwarehouse-index.js --dry-run"
   },
   "dependencies": {
     "cheerio": "^1.0.0-rc.12",
