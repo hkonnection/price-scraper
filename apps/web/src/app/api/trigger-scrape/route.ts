@@ -3,12 +3,15 @@ import { getRequestContext } from '@cloudflare/next-on-pages';
 export const runtime = 'edge';
 
 /**
- * Maps retailer slugs to their GitHub Actions workflow files.
+ * Derives the GitHub Actions workflow filename from a retailer slug.
+ * Convention: `scrape-{slug}.yml` for all retailers except costco which uses `scrape.yml`.
+ *
+ * @param {string} slug - The retailer slug (e.g. 'nike', 'indigo', 'costco')
+ * @returns {string} The workflow filename
  */
-const RETAILER_WORKFLOWS: Record<string, string> = {
-  costco: 'scrape.yml',
-  westcoastkids: 'scrape-westcoastkids.yml',
-};
+function getWorkflowFile(slug: string): string {
+  return slug === 'costco' ? 'scrape.yml' : `scrape-${slug}.yml`;
+}
 
 /**
  * POST /api/trigger-scrape
@@ -39,13 +42,7 @@ export async function POST(request: Request) {
       // No body or invalid JSON, use default
     }
 
-    const workflowFile = RETAILER_WORKFLOWS[retailer];
-    if (!workflowFile) {
-      return Response.json(
-        { error: `No workflow configured for retailer: ${retailer}` },
-        { status: 400 }
-      );
-    }
+    const workflowFile = getWorkflowFile(retailer);
 
     const response = await fetch(
       `https://api.github.com/repos/hkonnection/price-scraper/actions/workflows/${workflowFile}/dispatches`,
