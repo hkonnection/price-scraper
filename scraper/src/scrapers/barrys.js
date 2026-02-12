@@ -18,7 +18,7 @@ const PAGE_LIMIT = 250;
  * @returns {Promise<Array<object>>} Array of Shopify product objects
  */
 async function fetchSalePage(page) {
-  const url = `${SHOP_BASE}${SALE_COLLECTION}?limit=${PAGE_LIMIT}&page=${page}`;
+  const url = `${SHOP_BASE}${SALE_COLLECTION}?limit=${PAGE_LIMIT}&page=${page}&currency=CAD`;
 
   const response = await fetch(url, {
     headers: {
