@@ -18,6 +18,7 @@ export async function getCleaner(retailerSlug) {
     indigo: () => import('./indigo.js'),
     nike: () => import('./nike.js'),
     barrys: () => import('./barrys.js'),
+    sportchek: () => import('./sportchek.js'),
   };
 
   const loader = cleaners[retailerSlug];
