@@ -11,6 +11,7 @@ const DRY_RUN = process.argv.includes('--dry-run');
 
 /**
  * Runs the Sport Chek scrape and either prints or stores the deals.
+ * `--watch=<code>` traces one product or SKU through the stock filter.
  *
  * @returns {Promise<void>}
  */
@@ -20,8 +21,18 @@ async function main() {
 
   try {
     console.log('\nFetching sale and clearance deals from sportchek.ca...');
-    const { deals: rawDeals } = await scrapeSportchek();
-    console.log(`Found ${rawDeals.length} deals`);
+    const watchArg = process.argv.find(arg => arg.startsWith('--watch='));
+    const watch = watchArg ? watchArg.slice('--watch='.length) : '';
+    const {
+      deals: rawDeals,
+      pricedDeals,
+      droppedUnavailable,
+      watchStatus,
+    } = await scrapeSportchek({ watch });
+    console.log(`Priced deals before stock filter: ${pricedDeals}`);
+    console.log(`Dropped with no online stock and no stock at store 314: ${droppedUnavailable}`);
+    console.log(`Found ${rawDeals.length} deals after stock filter`);
+    if (watch) console.log(`Watch ${watch}: ${watchStatus}`);
 
     const cleaner = await getCleaner('sportchek');
     const deals = cleaner.clean(rawDeals);

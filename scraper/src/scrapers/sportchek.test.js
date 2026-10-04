@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildDeal, normalizeBrand, productImageUrl, productPageUrl } from './sportchek.js';
+import { availabilityErrorIsRetryable, buildDeal, isPurchasable, normalizeBrand, productImageUrl, productPageUrl } from './sportchek.js';
 import { clean } from '../cleaners/sportchek.js';
 
 const listing = {
@@ -79,4 +79,76 @@ test('buildDeal rejects missing, equal, or inverted prices', () => {
   assert.equal(buildDeal(listing, { currentPrice: { value: 80 }, originalPrice: { value: 40 } }, 'Sale'), null);
   assert.equal(buildDeal({ title: '' }, priceGroup, 'Sale'), null);
   assert.equal(buildDeal(null, priceGroup, 'Sale'), null);
+});
+
+test('isPurchasable keeps a deal when any SKU has online or store stock', () => {
+  const onlineOnly = [{
+    code: '1',
+    fulfillment: { availability: { Corporate: { Quantity: 1 }, quantity: 0 } },
+  }];
+  const storeOnly = [{
+    code: '2',
+    fulfillment: { availability: { Corporate: { Quantity: 0 }, quantity: 2 } },
+  }];
+  assert.equal(isPurchasable(onlineOnly, ['1']), true);
+  assert.equal(isPurchasable(storeOnly, ['2']), true);
+  assert.equal(isPurchasable([...onlineOnly, {
+    code: '9',
+    fulfillment: { availability: { Corporate: { Quantity: 0 }, quantity: 0 } },
+  }], ['1', '9']), true);
+});
+
+test('isPurchasable treats numeric strings as quantities', () => {
+  const rows = [{
+    code: '1',
+    fulfillment: { availability: { Corporate: { Quantity: '0' }, quantity: '3' } },
+  }];
+  assert.equal(isPurchasable(rows, ['1']), true);
+  assert.equal(isPurchasable([{
+    code: '1',
+    fulfillment: { availability: { Corporate: { Quantity: '0' }, quantity: '0' } },
+  }], ['1']), false);
+});
+
+test('isPurchasable drops a deal when every SKU has no online and no store stock', () => {
+  const rows = ['334252508', '334252512'].map(code => ({
+    code,
+    sellable: true,
+    orderable: true,
+    fulfillment: {
+      availability: { Corporate: { Quantity: 0 }, quantity: 0 },
+      shipToHome: { enabled: true },
+      storePickUp: { enabled: true },
+    },
+  }));
+  assert.equal(isPurchasable(rows, ['334252508', '334252512']), false);
+});
+
+test('isPurchasable keeps a deal when one quantity is unknown', () => {
+  assert.equal(isPurchasable([{
+    code: '1',
+    fulfillment: { availability: { Corporate: { Quantity: 0 }, quantity: null } },
+  }], ['1']), true);
+  assert.equal(isPurchasable([{
+    code: '1',
+    fulfillment: { availability: { Corporate: { Quantity: '  ' }, quantity: '0' } },
+  }], ['1']), true);
+});
+
+test('isPurchasable keeps a deal when availability data is missing and does not throw', () => {
+  assert.equal(isPurchasable(undefined, ['1']), true);
+  assert.equal(isPurchasable(null, ['1']), true);
+  assert.equal(isPurchasable([], ['1']), true);
+  assert.equal(isPurchasable([{ code: '1' }], ['1']), true);
+  assert.equal(isPurchasable([{ code: '1', fulfillment: { availability: { Corporate: { Quantity: 0 }, quantity: 0 } } }], ['1', '2']), true);
+  assert.equal(isPurchasable([{ fulfillment: null }, 'nope', null], ['1']), true);
+  assert.equal(isPurchasable([{ code: '1', fulfillment: { availability: { Corporate: { Quantity: 'none' }, quantity: null } } }], ['1']), true);
+});
+
+test('availabilityErrorIsRetryable retries server errors and not client errors', () => {
+  assert.equal(availabilityErrorIsRetryable(new Error('Sport Chek API error: 500  for https://example')), true);
+  assert.equal(availabilityErrorIsRetryable(new Error('Sport Chek API error: 429  for https://example')), true);
+  assert.equal(availabilityErrorIsRetryable(new Error('Sport Chek API error: 400  for https://example')), false);
+  assert.equal(availabilityErrorIsRetryable(new Error('Sport Chek API error: 404  for https://example')), false);
+  assert.equal(availabilityErrorIsRetryable(null), false);
 });
