@@ -4,7 +4,8 @@
  * Uses direct REST API calls — no Playwright required.
  */
 
-const BASE_API_URL = 'https://api.nike.com/discover/product_wall/v1/marketplace/CA/language/en-GB/consumerChannelId/d9a5bc42-4b9c-4976-858a-f159cf99c647';
+// Discover uses CAN for Canada; the storefront path still uses /ca/.
+const BASE_API_URL = 'https://api.nike.com/discover/product_wall/v1/marketplace/CAN/language/en-GB/consumerChannelId/d9a5bc42-4b9c-4976-858a-f159cf99c647';
 const SALE_PATH = '/ca/w/sale-3yaep';
 const SALE_ATTRIBUTE_ID = '5b21a62a-0503-400c-8336-3ccfbff2a684';
 const PAGE_SIZE = 24;
