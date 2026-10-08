@@ -33,7 +33,7 @@ export default function PublicationSummary({ retailers, retailerDates, retailerP
         );
       })}
       <p>Stale means older than the maximum scheduled collection gap: 4 days for twice-weekly sources, 7 days for weekly sources. This is an age rule, not a report of the latest attempt.</p>
-      <p>Saved prices and availability may have changed. Last published does not prove full product or variant coverage. Fetch failures before the writer are only visible in Actions run history.</p>
+      <p>Saved prices and availability may have changed. Last published does not prove full product or variant coverage. Fetch failures before database writing are not recorded in database history. Actions run history shows hosted attempts only; local attempts are not included.</p>
       {hasLegacyRows && <p>Legacy rows have no verified publication date. Their observation dates are shown separately.</p>}
     </section>
   );

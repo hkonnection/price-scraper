@@ -139,6 +139,17 @@ test('server zones produce identical dates and age labels', () => {
   assert.equal(new Set(results.map(r => r.stdout)).size, 1);
 });
 
+test('run history distinguishes hosted and local attempts without promising all failure logs', async () => {
+  const { db, facade } = fixture();
+  try {
+    const html = await pageHTML(facade);
+    assert.doesNotMatch(html, /only visible in Actions/);
+    assert.match(html, /hosted attempts only/);
+    assert.match(html, /local attempts are not included/);
+    assert.match(html, /before database writing are not recorded in database history/);
+  } finally { db.close(); }
+});
+
 test('workflow links and cadence match existing repository files', () => {
   const { collectionPolicy } = appLoader()('publication.ts');
   for (const slug of ['costco','nike','sportchek','lululemon','barrys','gourmetwarehouse','indigo','toycompany','westcoastkids','wholefoods']) {
