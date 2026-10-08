@@ -3,6 +3,7 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import DealsTable from './DealsTable';
+import PublicationSummary from './PublicationSummary';
 import ImportModal from './ImportModal';
 import RefreshButton from './RefreshButton';
 
@@ -27,6 +28,8 @@ export interface Deal {
   image_url: string | null;
   product_url: string | null;
   scraped_at: string;
+  published_at: string | null;
+  scrape_id: number | null;
   in_stock: number;
   retailer_slug: string;
   retailer_name: string;
@@ -35,15 +38,19 @@ export interface Deal {
 interface DealsPageClientProps {
   deals: Deal[];
   retailers: Retailer[];
-  retailerDates: Record<string, string>;
+  retailerDates: Record<string, string | null>;
+  retailerPaused: Record<string, boolean>;
+  evaluatedAt: string;
   flyerDates: string | null;
 }
 
 /**
  * Client-side wrapper that manages retailer/category/sale-type filters,
- * stats display, import modal, and renders the DealsTable.
+ * stats display, publication age, and renders the DealsTable.
+ * @param props - Published rows and per-store metadata from the server reader.
+ * @returns Interactive filters and saved deal results.
  */
-export default function DealsPageClient({ deals, retailers, retailerDates, flyerDates }: DealsPageClientProps) {
+export default function DealsPageClient({ deals, retailers, retailerDates, retailerPaused, evaluatedAt, flyerDates }: DealsPageClientProps) {
   const searchParams = useSearchParams();
   const router = useRouter();
 
@@ -114,15 +121,10 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
     : `${activeRetailer?.name || selectedRetailer} Deals`;
 
   const headerSubtitle = selectedRetailer === 'costco'
-    ? 'Current sale items from Costco (BC, AB, SK, MB)'
+    ? 'Saved sale items from Costco (BC, AB, SK, MB)'
     : selectedRetailer === 'all'
-      ? 'Deals across all retailers'
-      : `Current deals from ${activeRetailer?.name || selectedRetailer}`;
-
-  // Get the last updated date for the selected retailer (null for "all" view)
-  const lastUpdated = selectedRetailer === 'all'
-    ? null
-    : retailerDates[selectedRetailer] || null;
+      ? 'Limited selection across retailers, up to 2,000 loaded rows. Publication dates differ by store.'
+      : `Saved deals from ${activeRetailer?.name || selectedRetailer}`;
 
   /**
    * Resets category/promo filters when retailer changes.
@@ -156,6 +158,14 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
           </p>
         )}
       </header>
+
+      <PublicationSummary
+        retailers={selectedRetailer === 'all' ? retailers : retailers.filter(r => r.slug === selectedRetailer)}
+        retailerDates={retailerDates}
+        retailerPaused={retailerPaused}
+        evaluatedAt={evaluatedAt}
+        hasLegacyRows={filteredDeals.some(deal => deal.scrape_id === null)}
+      />
 
       <div className="filter-bar">
         <div className="filter-group">
@@ -208,7 +218,7 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
       <div className="stats">
         <div className="stat-card">
           <div className="value">{totalDeals}</div>
-          <div className="label">Total Deals</div>
+          <div className="label">Loaded Deals</div>
         </div>
         <div className="stat-card">
           <div className="value">{avgSavings.toFixed(0)}%</div>
@@ -259,7 +269,6 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
 
       <DealsTable
         deals={paginatedDeals}
-        lastUpdated={lastUpdated}
         showRetailer={selectedRetailer === 'all'}
       />
 
