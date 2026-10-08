@@ -11,8 +11,11 @@ import { clean } from '../cleaners/lululemon.js';
  * @param {object} options - Isolated environment and launch-options recorder.
  * @returns {Promise<object>} Actual scraper functions in an isolated module.
  */
-async function parser(browser = null, { env = {}, launches = [], logs = [] } = {}) {
-  const context = vm.createContext({ console: { log: (...args) => console.log(...args),
+async function parser(browser = null, { env = {}, launches = [], logs = [], messages = [], failPrimaryLog = false } = {}) {
+  const context = vm.createContext({ console: { log: (...args) => {
+    if (failPrimaryLog && args[0]?.startsWith('WMTM primary failed:')) throw new Error('Synthetic logger failure');
+    messages.push(args.join(' ')); console.log(...args);
+  },
     warn: (...args) => logs.push(args.join(' ')) }, URL, process: { env },
     fetch: () => { throw new Error('Remote I/O forbidden in replay'); }, setTimeout: fn => { fn(); } });
   const source = await fs.readFile(new URL('./lululemon.js', import.meta.url), 'utf8');
@@ -152,15 +155,15 @@ function paginatedPage(context, catalogs) {
  * @returns {Promise<object>} Exit, publication, launch, browser-close and local state evidence.
  */
 async function entrypointReplay(catalogs, { dry = false, failFinal = null, env = {}, distinctSections = false,
-  links, failure = null } = {}) {
+  links, failure = null, failures = {}, failPrimaryLog = false } = {}) {
   let replay;
   let closed = false;
   const browser = {
     async newContext() { return { async newPage() { return replay; } }; },
     async close() { closed = true; },
   };
-  const launches = [], diagnostics = [], urls = [];
-  const { api, context } = await parser(browser, { env, launches, logs: diagnostics });
+  const launches = [], diagnostics = [], urls = [], messages = [];
+  const { api, context } = await parser(browser, { env, launches, logs: diagnostics, messages, failPrimaryLog });
   const { replay: baseReplay, visited } = paginatedPage(context, catalogs);
   replay = baseReplay;
   if (links !== undefined) replay.$$eval = page(context, html(catalogs[0]), 200, links).$$eval;
@@ -191,16 +194,21 @@ async function entrypointReplay(catalogs, { dry = false, failFinal = null, env =
   const goto = replay.goto;
   replay.goto = async url => {
     urls.push(url);
-    if (failure && (failure.stage === 'home' ? new URL(url).pathname === '/en-ca/'
-      : new URL(url).pathname.includes('/c/we-made-too-much/'))) {
-      if (failure.unavailable) {
+    const refused = failures[url] ?? (failure && (failure.stage === 'home' ? new URL(url).pathname === '/en-ca/'
+      : new URL(url).pathname.includes('/c/we-made-too-much/')) ? failure : null);
+    if (refused?.empty) {
+      page(context, html(currentData({ totalCount: 0, products: [] })));
+      return { ok: () => true, status: () => 200, url: () => url };
+    }
+    if (refused) {
+      if (refused.unavailable) {
         replay.title = async () => { throw new Error('Diagnostic title unavailable'); };
         replay.evaluate = async () => { throw new Error('Diagnostic body unavailable'); };
       } else {
-        replay.title = async () => failure.title ?? 'Public service error';
-        context.document.body = { innerText: failure.body ?? 'Public request could not be completed' };
+        replay.title = async () => refused.title ?? 'Public service error';
+        context.document.body = { innerText: refused.body ?? 'Public request could not be completed' };
       }
-      return { ok: () => false, status: () => failure.status, url: () => `${url}?token=SYNTHETIC_SECRET#private` };
+      return { ok: () => false, status: () => refused.status, url: () => `${url}?token=SYNTHETIC_SECRET#private` };
     }
     return goto(url);
   };
@@ -226,7 +234,7 @@ async function entrypointReplay(catalogs, { dry = false, failFinal = null, env =
     }, { context: runtime });
   });
   await module.evaluate();
-  return { exits, writes, errors, publication, prior, closed, launches, visited, diagnostics, urls };
+  return { exits, writes, errors, publication, prior, closed, launches, visited, diagnostics, urls, messages };
 }
 
 /**
@@ -1054,7 +1062,7 @@ test('WMTM browser setup failures close acquired resources', async () => {
   }
 });
 
-test('WMTM missing homepage link uses saved fallback before navigation only', async () => {
+test('WMTM primary works without a navigation link and missing fallback does not retry', async () => {
   const result = await entrypointReplay([currentData()], { dry: true, links: [] });
   assert.deepEqual(result.exits, []);
   assert.ok(result.urls.includes('https://shop.lululemon.com' + menPath));
@@ -1069,7 +1077,7 @@ test('WMTM missing homepage link uses saved fallback before navigation only', as
 test('WMTM zero products reject with the exact URL and retained previous publication', async () => {
   const result = await entrypointReplay([currentData({ totalCount: 0, products: [] })], { dry: true });
   assert.deepEqual(result.exits, [1]);
-  assert.match(result.errors[0], /https:\/\/shop.lululemon.com\/en-ca\/c\/we-made-too-much\/n18mhd.*Empty or malformed catalog products/);
+  assert.match(result.errors[0], /https:\/\/shop.lululemon.com\/en-ca\/c\/we-made-too-much\/n18mhd.*Empty catalog products/);
   assert.deepEqual(result.publication, result.prior);
   assert.equal(result.closed, true);
 });
@@ -1077,16 +1085,16 @@ test('WMTM zero products reject with the exact URL and retained previous publica
 test('WMTM navigation offline smoke runs happy, negative, then unchanged publication state', async t => {
   const successes = [], rejected = [];
   const links = [{ href: verifiedFutureMenPath, text: 'We Made Too Much' }];
-  await t.test('phase 1 happy: discovered link through actual scraper, cleaner and entrypoint', async () => {
+  await t.test('phase 1 happy: primary collection through actual scraper, cleaner and entrypoint', async () => {
     for (const dry of [false, true]) {
       const result = await entrypointReplay([currentData()], { dry, links });
       assert.deepEqual(result.exits, []);
       assert.equal(result.writes.length, dry ? 0 : 1);
-      assert.ok(result.urls.includes(`https://shop.lululemon.com${verifiedFutureMenPath}`));
-      assert.equal(result.urls.some(url => url.includes(menPath)), false);
+      assert.ok(result.urls.includes(`https://shop.lululemon.com${menPath}`));
+      assert.equal(result.urls.some(url => url.includes(verifiedFutureMenPath)), false);
       assert.equal(result.closed, true);
       successes.push(result);
-      console.log(`MEN_SMOKE_HAPPY dry=${dry} discoveredPathUsed=true cleanedRows=3 publishCalls=${result.writes.length} browserClosed=true remoteWrites=0`);
+      console.log(`MEN_SMOKE_HAPPY dry=${dry} primaryPathUsed=true cleanedRows=3 publishCalls=${result.writes.length} browserClosed=true remoteWrites=0`);
     }
   });
   await t.test('phase 2 negative: refusals, bad navigation and retained completeness rejection', async () => {
@@ -1095,8 +1103,8 @@ test('WMTM navigation offline smoke runs happy, negative, then unchanged publica
       ['home HTTP 403', { failure: { stage: 'home', status: 403 } }, /HTTP 403/],
       ['catalog HTTP 404', { failure: { stage: 'catalog', status: 404 } }, /HTTP 404/],
       ['unavailable diagnostics', { links, failure: { stage: 'catalog', status: 400, unavailable: true } }, /HTTP 400/],
-      ['ambiguous link', { links: [...links, { href: menPath, text: 'We Made Too Much' }] }, /Lululemon WMTM navigation/],
-      ['off-origin link', { links: [{ href: `https://elsewhere.example${verifiedFutureMenPath}`, text: 'We Made Too Much' }] }, /Lululemon WMTM navigation/],
+      ['ambiguous link', { links: [...links, { href: menPath, text: 'We Made Too Much' }], failure: { stage: 'catalog', status: 404 } }, /Lululemon WMTM navigation/],
+      ['off-origin link', { links: [{ href: `https://elsewhere.example${verifiedFutureMenPath}`, text: 'We Made Too Much' }], failure: { stage: 'catalog', status: 404 } }, /Lululemon WMTM navigation/],
       ['retained short raw page', { failFinal: currentData({ totalCount: 3, products: currentProducts(0, 2) }) }, /Incomplete catalog products/],
     ]) {
       for (const dry of [false, true]) {
@@ -1106,7 +1114,8 @@ test('WMTM navigation offline smoke runs happy, negative, then unchanged publica
         assert.equal(result.writes.length, 0, name);
         assert.equal(result.closed, true, name);
         if (options.failure) {
-          assert.equal(result.diagnostics.length, 1, name);
+          assert.equal(result.diagnostics.length, options.failure.stage === 'home' ? 1
+            : result.urls.filter(url => url.includes('/c/we-made-too-much/')).length, name);
           assert.match(result.diagnostics[0], /HTTP.*final URL=/);
           assert.doesNotMatch(result.diagnostics[0], /SYNTHETIC_SECRET|token=|#private/);
         }
@@ -1116,15 +1125,16 @@ test('WMTM navigation offline smoke runs happy, negative, then unchanged publica
     }
     // Harder after a clean negative pass: a conflicting bad link must not be ignored
     // just because one valid link exists, and failed collection requests must not retry.
-    const mixed = await entrypointReplay([currentData()], { links: [...links, { href: '/en-us/c/we-made-too-much/synthetic123', text: 'We Made Too Much' }] });
+    const mixed = await entrypointReplay([currentData()], { links: [...links, { href: '/en-us/c/we-made-too-much/synthetic123', text: 'We Made Too Much' }], failure: { stage: 'catalog', status: 404 } });
     assert.deepEqual(mixed.exits, [1]);
     assert.match(mixed.errors[0], /Lululemon WMTM navigation/);
     rejected.push(mixed);
     rejected.filter(result => result.errors[0].includes('page 1: HTTP')).forEach(result => {
-      assert.ok(result.urls.filter(url => url.includes('/c/we-made-too-much/')).length <= 1);
+      const attempted = result.urls.filter(url => url.includes('/c/we-made-too-much/'));
+      assert.equal(new Set(attempted).size, attempted.length, 'Never repeat a failed destination');
       assert.equal(result.urls.some(url => /(?:men|women)-we-made-too-much|we-made-too-much-accessories/.test(url)), false);
     });
-    console.log('MEN_SMOKE_NEGATIVE harder: mixed invalid link rejected; no refusal retry; no separate gender or accessory request after collection failure');
+    console.log('MEN_SMOKE_NEGATIVE harder: mixed invalid link rejected; no repeated failed destination; no separate gender or accessory request');
   });
   await t.test('phase 3 state: failed sections preserve prior synthetic publication and close browser', () => {
     assert.equal(rejected.length, 23);
@@ -1137,5 +1147,132 @@ test('WMTM navigation offline smoke runs happy, negative, then unchanged publica
     assert.equal(successes[0].publication.length, 3);
     assert.deepEqual(successes[1].publication, successes[1].prior);
     console.log('MEN_SMOKE_STATE successfulReplacementRows=3 successfulDryRunsUnchanged=1 rejectedPriorSnapshotsUnchanged=23 browserClosedAll=true remoteWrites=0');
+  });
+});
+
+test('primary-first bounded fallback smoke runs happy, negative, then state verification', async t => {
+  const primaryUrl = `https://shop.lululemon.com${menPath}`;
+  const fallbackUrl = `https://shop.lululemon.com${verifiedFutureMenPath}`;
+  const links = [{ href: verifiedFutureMenPath, text: 'We Made Too Much' }];
+  const successes = [], rejected = [];
+  await t.test('phase 1 happy: fixed primary first, then one distinct navigation fallback if needed', async () => {
+    const primary = await entrypointReplay([currentData()], { dry: true, links });
+    assert.deepEqual(primary.exits, []);
+    assert.deepEqual(primary.urls, ['https://shop.lululemon.com/en-ca/', primaryUrl]);
+    assert.ok(primary.messages.includes(`WMTM source=primary; URL=${primaryUrl}`));
+    assert.equal(primary.messages.some(message => message.includes('source=fallback-navigation')), false);
+    successes.push(primary);
+    for (const refusal of [{ status: 400 }, { status: 403 }, { status: 404 }, { status: 429 }, { status: 503 }, { empty: true }]) {
+      for (const dry of [false, true]) {
+        const result = await entrypointReplay([currentData()], { dry, links, failures: { [primaryUrl]: refusal } });
+        assert.deepEqual(result.exits, []);
+        assert.deepEqual(result.urls, ['https://shop.lululemon.com/en-ca/', primaryUrl, fallbackUrl]);
+        assert.ok(result.messages.includes(`WMTM source=fallback-navigation; URL=${fallbackUrl}`));
+        assert.equal(result.writes.length, dry ? 0 : 1);
+        assert.equal(result.closed, true);
+        successes.push(result);
+      }
+    }
+    // A later-page refusal must discard primary partial rows and start the distinct
+    // fallback collection from page 1. Never merge incomplete primary rows.
+    const catalogs = [currentData({ totalCount: 5, limit: 3, products: currentProducts(0, 3) }),
+      currentData({ totalCount: 5, limit: 3, offset: 3, products: currentProducts(3, 2) })];
+    const later = await entrypointReplay(catalogs, { links, failures: { [`${primaryUrl}?page=2`]: { status: 400 } } });
+    assert.deepEqual(later.exits, []);
+    assert.equal(later.publication.length, 5);
+    assert.ok(later.messages.some(message => message.includes(`${primaryUrl}?page=2`) && message.includes('HTTP 400')),
+      'Successful fallback must retain the exact failed primary URL');
+    assert.equal(new Set(later.publication.map(row => row.product_code)).size, 5);
+    assert.deepEqual(later.urls, ['https://shop.lululemon.com/en-ca/', primaryUrl, `${primaryUrl}?page=2`, fallbackUrl, `${fallbackUrl}?page=2`]);
+    successes.push(later);
+    console.log('PRIMARY_SMOKE_HAPPY primaryUsedFirst=true refusalOrEmptyFallbackControls=12 laterPageFallbackUniqueRows=5 fallbackAttemptsAtMostOne=true remoteWrites=0');
+  });
+  await t.test('phase 2 negative: no repeated destination, no unsafe navigation, no guard-error fallback', async () => {
+    for (const [name, fallbackLinks, failures, message] of [
+      ['missing', [], { [primaryUrl]: { status: 404 } }, /HTTP 404/],
+      ['same path', [{ href: menPath, text: 'We Made Too Much' }], { [primaryUrl]: { status: 400 } }, /HTTP 400/],
+      ['same path with tracking', [{ href: `${menPath}?icid=public`, text: 'We Made Too Much' }], { [primaryUrl]: { status: 404 } }, /HTTP 404/],
+      ['ambiguous', [...links, { href: menPath, text: 'We Made Too Much' }], { [primaryUrl]: { status: 400 } }, /HTTP 400/],
+      ['off origin', [{ href: `https://elsewhere.example${verifiedFutureMenPath}`, text: 'We Made Too Much' }], { [primaryUrl]: { status: 403 } }, /HTTP 403/],
+      ['fallback refused', links, { [primaryUrl]: { status: 404 }, [fallbackUrl]: { status: 503 } }, /HTTP 404.*HTTP 503/],
+      ['fallback empty', links, { [primaryUrl]: { status: 400 }, [fallbackUrl]: { empty: true } }, /HTTP 400.*Empty catalog products/],
+    ]) {
+      for (const dry of [false, true]) {
+        const result = await entrypointReplay([currentData()], { dry, links: fallbackLinks, failures });
+        assert.deepEqual(result.exits, [1], name);
+        assert.match(result.errors[0], message, name);
+        assert.ok(result.errors[0].includes(primaryUrl), name);
+        assert.equal(result.urls.filter(url => url === primaryUrl).length, 1, name);
+        assert.ok(result.urls.filter(url => url === fallbackUrl).length <= 1, name);
+        if (name.startsWith('fallback')) assert.ok(result.errors[0].includes(fallbackUrl), name);
+        assert.equal(result.closed, true, name);
+        assert.equal(result.writes.length, 0, name);
+        rejected.push(result);
+      }
+    }
+    const malformed = currentData({ totalCount: 0, products: [] });
+    malformed.props.pageProps.dehydratedState.queries[0].state.data.pages[0].included = null;
+    const badShape = await entrypointReplay([malformed], { links });
+    assert.deepEqual(badShape.exits, [1]);
+    assert.equal(badShape.urls.includes(fallbackUrl), false, 'Malformed catalog is not a moved link');
+    rejected.push(badShape);
+    for (const options of [{ totalCount: 3 }, { totalCount: 0, limit: 0 }, { totalCount: 0, offset: 1 }]) {
+      const invalidEmpty = await entrypointReplay([currentData({ ...options, products: [] })], { links });
+      assert.deepEqual(invalidEmpty.exits, [1]);
+      assert.equal(invalidEmpty.urls.includes(fallbackUrl), false, 'Invalid metadata or raw truncation is not link drift');
+      rejected.push(invalidEmpty);
+    }
+    for (const totalPages of [0, undefined]) {
+      const invalidLegacy = legacyData([], 1);
+      invalidLegacy.props.pageProps.dehydratedState.queries[0].state.data.pages[0].totalProductPages = totalPages;
+      const result = await entrypointReplay([invalidLegacy], { links });
+      assert.deepEqual(result.exits, [1]);
+      assert.equal(result.urls.includes(fallbackUrl), false, 'Invalid legacy pagination cannot activate fallback');
+      rejected.push(result);
+    }
+    const truncated = await entrypointReplay([currentData({ totalCount: 3, products: currentProducts(0, 2) })], { links });
+    assert.deepEqual(truncated.exits, [1]);
+    assert.match(truncated.errors[0], /Incomplete catalog products/);
+    assert.equal(truncated.urls.includes(fallbackUrl), false);
+    rejected.push(truncated);
+    // Harder after a clean first pass: empty final page must not be treated as a
+    // moved collection, and a repeated primary page-2 refusal must never be retried.
+    const emptyFinal = await entrypointReplay([
+      currentData({ totalCount: 5, limit: 3, products: currentProducts(0, 3) }),
+      currentData({ totalCount: 5, limit: 3, offset: 3, products: [] }),
+    ], { links });
+    assert.deepEqual(emptyFinal.exits, [1]);
+    assert.equal(emptyFinal.urls.includes(fallbackUrl), false);
+    rejected.push(emptyFinal);
+    const repeated = await entrypointReplay([
+      currentData({ totalCount: 5, limit: 3, products: currentProducts(0, 3) }),
+      currentData({ totalCount: 5, limit: 3, offset: 3, products: currentProducts(3, 2) }),
+    ], { links: [{ href: menPath, text: 'We Made Too Much' }], failures: { [`${primaryUrl}?page=2`]: { status: 400 } } });
+    assert.deepEqual(repeated.exits, [1]);
+    assert.equal(repeated.urls.filter(url => url === `${primaryUrl}?page=2`).length, 1);
+    rejected.push(repeated);
+    const brokenLogger = await entrypointReplay([currentData()], { failPrimaryLog: true,
+      failures: { [primaryUrl]: { status: 400 } } });
+    assert.deepEqual(brokenLogger.exits, [1]);
+    assert.match(brokenLogger.errors[0], /HTTP 400/);
+    assert.equal(brokenLogger.urls.filter(url => url === primaryUrl).length, 1);
+    rejected.push(brokenLogger);
+    console.log('PRIMARY_SMOKE_NEGATIVE rejected=24 repeatedPrimaryRequests=0 unsafeDestinations=0 rawGuardFallbacks=0 fallbackRetries=0 remoteWrites=0');
+  });
+  await t.test('phase 3 state: failed attempts preserve prior publication and successful fallback replaces once', () => {
+    assert.equal(successes.length, 14);
+    assert.equal(rejected.length, 24);
+    [...successes, ...rejected].forEach(result => assert.equal(result.closed, true));
+    rejected.forEach(result => {
+      assert.deepEqual(result.publication, result.prior);
+      assert.equal(result.writes.length, 0);
+    });
+    successes.forEach(result => {
+      if (result.writes.length) {
+        assert.equal(result.writes.length, 1);
+        assert.deepEqual(result.publication, structuredClone(result.writes[0]));
+      } else assert.deepEqual(result.publication, result.prior);
+    });
+    console.log('PRIMARY_SMOKE_STATE successfulControls=14 rejectedPriorSnapshotsUnchanged=24 noPartialMerge=true browserClosedAll=true remoteWrites=0');
   });
 });

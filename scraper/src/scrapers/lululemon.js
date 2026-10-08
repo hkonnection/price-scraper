@@ -13,15 +13,15 @@ const BASE_URL = 'https://shop.lululemon.com';
 // Initial-section anchor, rounded down: no cumulative widening on later pages.
 const MAX_SECTION_DRIFT_RATIO = 0.03;
 
-// Used only before navigation when the homepage has no sale link.
-const SAVED_WMTM_PATH = '/en-ca/c/we-made-too-much/n18mhd';
+// Primary unfiltered Canada collection. Navigation fallback may run only once.
+const PRIMARY_WMTM_PATH = '/en-ca/c/we-made-too-much/n18mhd';
 
 /**
  * Scrapes all WMTM deals from lululemon Canada.
  * Launches Chrome with normal browser defaults and navigates each WMTM page.
  * Set LULULEMON_VISIBLE_CHROME=1 for visible Chrome; all other values stay headless.
- * Reads the unfiltered sale link from the Canadian header on each run.
- * A missing link permits the saved fallback before navigation, never after refusal.
+ * Tries the primary unfiltered collection first. HTTP refusal or an empty first
+ * catalog permits one distinct on-page Canadian sale link, never the same path.
  * Does not mask fingerprints or solve retailer challenges.
  *
  * @returns {Promise<{deals: Array<object>, totalProducts: number, sections: Array<object>}>}
@@ -41,16 +41,42 @@ export async function scrapeLululemon() {
     const page = await context.newPage();
     // Navigate to homepage first to establish cookies, then go to WMTM.
     console.log('Navigating to lululemon homepage...');
-    await navigatePage(page, `${BASE_URL}/en-ca/`);
+    try { await navigatePage(page, `${BASE_URL}/en-ca/`); }
+    catch (error) { throw new Error(`Lululemon ${BASE_URL}/en-ca/: ${error.message}`); }
     await new Promise((resolve) => setTimeout(resolve, 2000));
-    const path = await discoverWmtmPath(page);
+    const path = PRIMARY_WMTM_PATH;
+    console.log(`WMTM source=primary; URL=${BASE_URL}${path}`);
     console.log('Session established.\n');
 
     // The site's unfiltered collection includes Women, Men and Accessories.
     // Do not infer gender labels from the request path or product names.
     for (const section of [{ name: 'We Made Too Much', path }]) {
       console.log(`--- Scraping ${section.name} WMTM ---`);
-      const sectionDeals = await scrapeSectionPages(page, section);
+      let sectionDeals;
+      try {
+        sectionDeals = await scrapeSectionPages(page, section);
+      } catch (primaryError) {
+        // Inventory drift, truncation and other catalog guards are not link drift.
+        if (typeof primaryError.httpStatus !== 'number' && !primaryError.emptyCatalog) throw primaryError;
+        try { console.log(`WMTM primary failed: ${primaryError.message}`); }
+        catch { /* Optional context logging must not replace the primary failure. */ }
+        let fallbackPath;
+        try { fallbackPath = await discoverWmtmPath(page); }
+        catch (error) {
+          throw new Error(`${primaryError.message}; on-page navigation fallback unavailable: ${error.message}`);
+        }
+        if (fallbackPath === path) {
+          console.log('WMTM fallback not attempted: on-page link names the primary collection');
+          throw primaryError;
+        }
+        console.log(`WMTM source=fallback-navigation; URL=${BASE_URL}${fallbackPath}`);
+        try {
+          // Discard every primary partial row. A distinct fallback must complete.
+          sectionDeals = await scrapeSectionPages(page, { ...section, path: fallbackPath });
+        } catch (fallbackError) {
+          throw new Error(`${primaryError.message}; navigation fallback failed: ${fallbackError.message}`);
+        }
+      }
       allDeals.push(...sectionDeals);
 
       sectionSummaries.push({
@@ -78,9 +104,9 @@ export async function scrapeLululemon() {
 
 /**
  * Reads only the site's unfiltered header sale link on an ordinary Canadian page.
- * Allows identical duplicate links and a saved fallback only when the link is absent.
- * Invalid or conflicting marked links fail before any collection navigation.
- * @param {import('playwright').Page} page - Loaded Canadian retailer homepage.
+ * Allows identical duplicate links. Missing, invalid or conflicting links fail.
+ * Called only after primary HTTP refusal or an empty first catalog.
+ * @param {import('playwright').Page} page - Primary page with Canadian header navigation.
  * @returns {Promise<string>} Same-origin unfiltered Canada collection path.
  * @throws {Error} When the source or any marked link is not trustworthy.
  */
@@ -92,11 +118,7 @@ async function discoverWmtmPath(page) {
     const links = await page.$$eval(selector, anchors => anchors.map(anchor => ({
       href: anchor.getAttribute('href'), text: anchor.textContent,
     })));
-    if (!Array.isArray(links)) throw new Error();
-    if (links.length === 0) {
-      console.log(`WMTM link source=saved fallback; URL=${BASE_URL}${SAVED_WMTM_PATH}`);
-      return SAVED_WMTM_PATH;
-    }
+    if (!Array.isArray(links) || links.length === 0) throw new Error();
     const paths = new Set();
     for (const link of links) {
       if (typeof link?.href !== 'string' || typeof link.text !== 'string' ||
@@ -108,11 +130,9 @@ async function discoverWmtmPath(page) {
       paths.add(url.pathname);
     }
     if (paths.size !== 1) throw new Error();
-    const path = [...paths][0];
-    console.log(`WMTM link source=discovered; URL=${BASE_URL}${path}`);
-    return path;
+    return [...paths][0];
   } catch {
-    throw new Error('Lululemon WMTM navigation: invalid or ambiguous Canada sale link');
+    throw new Error('Lululemon WMTM navigation: missing, invalid or ambiguous Canada sale link');
   }
 }
 
@@ -178,7 +198,9 @@ async function navigatePage(page, url) {
   try {
     console.warn(`Lululemon HTTP ${status}: final URL=${finalUrl}; ${kind}=${text || 'unavailable'}`);
   } catch { /* A failed logger must not hide the original status. */ }
-  throw new Error(`HTTP ${status}`);
+  const error = new Error(`HTTP ${status}`);
+  error.httpStatus = status;
+  throw error;
 }
 
 /**
@@ -268,7 +290,9 @@ async function scrapeSectionPages(page, section) {
 /**
  * Navigates to a single WMTM page and reads its embedded public NEXT_DATA.
  * Validates legacy/current catalog schemas, page offsets and raw reference counts.
- * Non-OK navigation logs safe bounded evidence and still rejects the whole run.
+ * Non-OK navigation logs safe bounded evidence and tags the HTTP failure.
+ * Only a well-formed zero-count first catalog is tagged as empty for fallback.
+ * Malformed, truncated and later empty pages retain fatal catalog guards.
  *
  * @param {import('playwright').Page} page - Playwright page with active session
  * @param {string} sectionPath - URL path for the WMTM section
@@ -294,10 +318,16 @@ async function fetchPageData(page, sectionPath, pageNum) {
           const catalog = currentQuery.state?.data?.pages?.[0];
           const attributes = catalog?.data?.attributes;
           const references = catalog?.data?.relationships?.products?.data;
-          if (!Array.isArray(catalog?.included) || !Array.isArray(references) || references.length === 0) {
+          if (!Array.isArray(catalog?.included) || !Array.isArray(references)) {
             throw new Error('Empty or malformed catalog products');
           }
           const { totalCount, limit, offset } = attributes || {};
+          if (references.length === 0) {
+            if (num === 1 && totalCount === 0 && Number.isSafeInteger(limit) && limit > 0 && offset === 0) {
+              throw new Error('Empty catalog products');
+            }
+            throw new Error('Empty or malformed catalog products');
+          }
           const totalProductPages = Math.ceil(totalCount / limit);
           if (!Number.isSafeInteger(totalCount) || totalCount <= 0 || !Number.isSafeInteger(limit) || limit <= 0 ||
               !Number.isSafeInteger(offset) || offset !== (num - 1) * limit || offset >= totalCount ||
@@ -318,13 +348,14 @@ async function fetchPageData(page, sectionPath, pageNum) {
 
         const legacyQuery = queries.find(q => q.queryKey?.[0] === 'CategoryPageDataQuery');
         const legacy = legacyQuery?.state?.data?.pages?.[0];
-        if (!Array.isArray(legacy?.products) || legacy.products.length === 0) {
+        if (!Array.isArray(legacy?.products)) {
           throw new Error('Unsupported or empty category catalog');
         }
         const totalProductPages = legacy.totalProductPages;
         if (!Number.isInteger(totalProductPages) || totalProductPages < 1 || totalProductPages > 200 || num > totalProductPages) {
           throw new Error('Invalid category pagination');
         }
+        if (legacy.products.length === 0) throw new Error('Empty category catalog');
         return { products: legacy.products, totalProductPages, catalogType: 'legacy' };
       },
       { num: pageNum }
@@ -332,7 +363,10 @@ async function fetchPageData(page, sectionPath, pageNum) {
 
     return result;
   } catch (err) {
-    throw new Error(`Lululemon ${BASE_URL}${sectionPath}${pageNum === 1 ? '' : `?page=${pageNum}`} page ${pageNum}: ${err.message}`);
+    const error = new Error(`Lululemon ${BASE_URL}${sectionPath}${pageNum === 1 ? '' : `?page=${pageNum}`} page ${pageNum}: ${err.message}`);
+    error.httpStatus = err.httpStatus;
+    error.emptyCatalog = pageNum === 1 && ['Empty catalog products', 'Empty category catalog'].includes(err.message);
+    throw error;
   }
 }
 
@@ -341,7 +375,7 @@ async function fetchPageData(page, sectionPath, pageNum) {
  * Skips products without valid pricing data.
  *
  * @param {object} product - Product from __NEXT_DATA__
- * @param {string} sectionName - WMTM section name (Women, Men, Accessories)
+ * @param {string} sectionName - Collection label; category mapping uses source data.
  * @returns {object|null} Deal object or null if invalid
  */
 function transformProduct(product, sectionName) {
