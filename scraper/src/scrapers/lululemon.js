@@ -95,7 +95,8 @@ export async function scrapeLululemon() {
 /**
  * Scrapes all pages for a single WMTM section using ordinary navigation.
  * Reads page 1 embedded catalog metadata, then visits each remaining page.
- * Rejects incomplete pagination instead of publishing a partial section.
+ * Checks stable raw pagination and unique product identities before sale filtering.
+ * Rejects incomplete or overlapping pagination instead of publishing a partial section.
  *
  * @param {import('playwright').Page} page - Playwright page with active session
  * @param {{name: string, path: string}} section - WMTM section config
@@ -104,22 +105,35 @@ export async function scrapeLululemon() {
  */
 async function scrapeSectionPages(page, section) {
   const sectionDeals = [];
-
-  // Fetch page 1 to get total page count
+  const seenProducts = new Set();
   const firstPageData = await fetchPageData(page, section.path, 1);
-
   const { products, totalProductPages } = firstPageData;
   console.log(`  ${section.name}: ${totalProductPages} pages to scrape`);
 
-  // Process page 1 products
-  const page1Deals = products.map((p) => transformProduct(p, section.name));
-  sectionDeals.push(...page1Deals.filter(Boolean));
-  console.log(`  Page 1: ${page1Deals.filter(Boolean).length} deals`);
-
-  // Fetch remaining pages
-  for (let pageNum = 2; pageNum <= totalProductPages; pageNum++) {
-    const pageData = await fetchPageData(page, section.path, pageNum);
-
+  for (let pageNum = 1; pageNum <= totalProductPages; pageNum++) {
+    const pageData = pageNum === 1 ? firstPageData : await fetchPageData(page, section.path, pageNum);
+    if (pageData.catalogType !== firstPageData.catalogType || pageData.totalProductPages !== totalProductPages ||
+        pageData.totalCount !== firstPageData.totalCount || pageData.limit !== firstPageData.limit) {
+      throw new Error(`Lululemon ${section.path} page ${pageNum}: Inconsistent catalog pagination`);
+    }
+    // Legacy pages expose no totalCount/limit; require full intermediate pages
+    // and allow a nonempty final page no larger than the first page.
+    if (pageData.catalogType === 'legacy' && (pageData.products.length > products.length ||
+        (pageNum < totalProductPages && pageData.products.length !== products.length))) {
+      throw new Error(`Lululemon ${section.path} page ${pageNum}: Inconsistent category product count`);
+    }
+    // Raw identities, not filtered deals, detect repeats even when offsets or
+    // prices change. Scope this set to one section, not overlapping sections.
+    for (const product of pageData.products) {
+      const id = pageData.catalogType === 'current' ? product?.id : product?.productId;
+      if (typeof id !== 'string' || !id.trim()) {
+        throw new Error(`Lululemon ${section.path} page ${pageNum}: Missing catalog product identity`);
+      }
+      if (seenProducts.has(id)) {
+        throw new Error(`Lululemon ${section.path} page ${pageNum}: Repeated catalog product ${id}`);
+      }
+      seenProducts.add(id);
+    }
     const pageDeals = pageData.products
       .map((p) => transformProduct(p, section.name))
       .filter(Boolean);
@@ -127,7 +141,7 @@ async function scrapeSectionPages(page, section) {
     console.log(`  Page ${pageNum}: ${pageDeals.length} deals`);
 
     // Small delay between pages to be respectful
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    if (pageNum > 1) await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
   return sectionDeals;
@@ -135,12 +149,12 @@ async function scrapeSectionPages(page, section) {
 
 /**
  * Navigates to a single WMTM page and reads its embedded public NEXT_DATA.
- * Validates legacy/current catalog schemas and page offsets.
+ * Validates legacy/current catalog schemas, page offsets and raw reference counts.
  *
  * @param {import('playwright').Page} page - Playwright page with active session
  * @param {string} sectionPath - URL path for the WMTM section
  * @param {number} pageNum - Page number to fetch
- * @returns {Promise<{products: Array<object>, totalProductPages: number}>}
+ * @returns {Promise<{products: Array<object>, totalProductPages: number, catalogType: string, totalCount?: number, limit?: number, offset?: number}>}
  * @throws {Error} When HTTP, embedded data or catalog pagination is unusable.
  */
 async function fetchPageData(page, sectionPath, pageNum) {
@@ -156,6 +170,7 @@ async function fetchPageData(page, sectionPath, pageNum) {
         const data = JSON.parse(embedded.textContent);
         const queries =
           data.props?.pageProps?.dehydratedState?.queries || [];
+        if (!Number.isSafeInteger(num) || num < 1) throw new Error('Invalid catalog pagination');
         const currentQuery = queries.find(q => q.queryKey?.[0] === 'catalogPageData');
         if (currentQuery) {
           const catalog = currentQuery.state?.data?.pages?.[0];
@@ -165,14 +180,22 @@ async function fetchPageData(page, sectionPath, pageNum) {
             throw new Error('Empty or malformed catalog products');
           }
           const { totalCount, limit, offset } = attributes || {};
-          if (!Number.isInteger(totalCount) || totalCount <= 0 || !Number.isInteger(limit) || limit <= 0 ||
-              !Number.isInteger(offset) || offset !== (num - 1) * limit || Math.ceil(totalCount / limit) > 200) {
+          const totalProductPages = Math.ceil(totalCount / limit);
+          if (!Number.isSafeInteger(totalCount) || totalCount <= 0 || !Number.isSafeInteger(limit) || limit <= 0 ||
+              !Number.isSafeInteger(offset) || offset !== (num - 1) * limit || offset >= totalCount ||
+              totalProductPages > 200 || num > totalProductPages) {
             throw new Error('Invalid catalog pagination');
           }
-          const byId = new Map(catalog.included.filter(p => p.type === 'products').map(p => [p.id, p]));
+          if (references.length !== Math.min(limit, totalCount - offset)) {
+            throw new Error('Incomplete catalog products: raw reference count does not match pagination');
+          }
+          if (references.some(ref => ref?.type !== 'products' || typeof ref.id !== 'string' || !ref.id.trim())) {
+            throw new Error('Missing catalog product identity');
+          }
+          const byId = new Map(catalog.included.filter(p => p?.type === 'products').map(p => [p.id, p]));
           const products = references.map(ref => byId.get(ref.id));
           if (products.some(p => !p?.attributes)) throw new Error('Missing referenced catalog product');
-          return { products, totalProductPages: Math.ceil(totalCount / limit) };
+          return { products, totalProductPages, catalogType: 'current', totalCount, limit, offset };
         }
 
         const legacyQuery = queries.find(q => q.queryKey?.[0] === 'CategoryPageDataQuery');
@@ -181,10 +204,10 @@ async function fetchPageData(page, sectionPath, pageNum) {
           throw new Error('Unsupported or empty category catalog');
         }
         const totalProductPages = legacy.totalProductPages;
-        if (!Number.isInteger(totalProductPages) || totalProductPages < 1 || totalProductPages > 200) {
+        if (!Number.isInteger(totalProductPages) || totalProductPages < 1 || totalProductPages > 200 || num > totalProductPages) {
           throw new Error('Invalid category pagination');
         }
-        return { products: legacy.products, totalProductPages };
+        return { products: legacy.products, totalProductPages, catalogType: 'legacy' };
       },
       { num: pageNum }
     );
