@@ -102,7 +102,7 @@ test('all-store metadata keeps paused, missing and invalid dates without a false
     assert.equal(result.deals.find(row => row.product_code === 'legacy').published_at, null);
     const markup = await html(facade, { retailer: 'all' });
     assert.match(markup, /Last published: Unknown/);assert.match(markup, /Age unknown/);
-    assert.match(markup, /Collection paused/);assert.match(markup, /Observed \(legacy\): 2026-06-01 12:00:00 UTC/);
+    assert.match(markup, /Collection paused/);assert.doesNotMatch(markup, /Observed \(legacy\): 2026-06-01 12:00:00 UTC/);
     assert.match(markup, /Publication dates differ by store/);
     assert.doesNotMatch(markup, /Limited selection|2,000 loaded rows|Current deals|Last updated:/);
   } finally { db.close(); }

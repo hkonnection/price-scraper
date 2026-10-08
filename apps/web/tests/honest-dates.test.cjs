@@ -52,7 +52,7 @@ test('selected publication, failed attempts, legacy rows and mixed store ages re
     assert.match(html, /Paged results across retailers/);
     assert.doesNotMatch(html, /Limited selection|2,000 loaded rows/);
     assert.match(html, /Collection paused/);
-    assert.match(html, /Observed \(legacy\)/);
+    assert.doesNotMatch(html, /Observed \(legacy\):/);
     assert.match(html, /Actions run history/);
     assert.doesNotMatch(html, /Current deals|Last updated:/);
     assert.deepEqual(db.prepare('SELECT * FROM deals ORDER BY id').all(), before);
@@ -109,7 +109,7 @@ test('database-paused active sources retain rows and show a paused warning', asy
     const html = await pageHTML(facade, 'sportchek');
     assert.match(html, /Collection paused/);
     assert.match(html, /Synthetic selected old price/);
-    assert.match(html, /Observed \(legacy\)/);
+    assert.doesNotMatch(html, /Observed \(legacy\):/);
   } finally { db.close(); }
 });
 

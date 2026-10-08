@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import type { SortKey } from './DealsPageClient';
-import { formatPublicationDate } from '../publication';
 
 interface Deal {
   id: number;
@@ -50,8 +49,8 @@ function getRetailerBadgeClass(slug: string): string {
 
 /**
  * Render the server-ordered page and request full-result sorting through its parent.
- * @param props - Bounded rows, selected sort, publication date, and navigation callback.
- * @returns The table with UTC publication or legacy observation dates and image modal.
+ * @param props - Bounded rows, selected sort, and navigation callback.
+ * @returns The product and price table with optional retailer badges and image modal.
  */
 export default function DealsTable({ deals, showRetailer = false, sortKey, sortDirection, pending, onSort }: DealsTableProps) {
   const [modalImage, setModalImage] = useState<{ url: string; name: string } | null>(null);
@@ -99,7 +98,6 @@ export default function DealsTable({ deals, showRetailer = false, sortKey, sortD
                   Retailer
                 </th>
               )}
-              <th style={{ whiteSpace: 'nowrap' }}>Publication / observation (UTC)</th>
               <th
                 className={getSortClass('product_name')}
                 onClick={() => handleSort('product_name')}
@@ -152,10 +150,6 @@ export default function DealsTable({ deals, showRetailer = false, sortKey, sortD
                     </span>
                   </td>
                 )}
-                <td className="updated-cell">
-                  {deal.scrape_id === null ? 'Observed (legacy): ' : 'Last published: '}
-                  {formatPublicationDate(deal.scrape_id === null ? deal.scraped_at : deal.published_at)}
-                </td>
                 <td>
                   <div className="product-cell">
                     {deal.image_url && (
