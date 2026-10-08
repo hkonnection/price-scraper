@@ -4,8 +4,6 @@ import { useState, useMemo, useEffect } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import DealsTable from './DealsTable';
 import PublicationSummary from './PublicationSummary';
-import ImportModal from './ImportModal';
-import RefreshButton from './RefreshButton';
 
 export interface Retailer {
   id: number;
@@ -46,7 +44,7 @@ interface DealsPageClientProps {
 
 /**
  * Client-side wrapper that manages retailer/category/sale-type filters,
- * stats display, publication age, and renders the DealsTable.
+ * stats display, publication age, and renders the read-only DealsTable.
  * @param props - Published rows and per-store metadata from the server reader.
  * @returns Interactive filters and saved deal results.
  */
@@ -59,7 +57,6 @@ export default function DealsPageClient({ deals, retailers, retailerDates, retai
   const [selectedRetailer, setSelectedRetailer] = useState(initialRetailer);
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [selectedPromoType, setSelectedPromoType] = useState('all');
-  const [showImportModal, setShowImportModal] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(500);
 
@@ -107,8 +104,6 @@ export default function DealsPageClient({ deals, retailers, retailerDates, retai
   }, [deals, selectedRetailer]);
 
   const activeRetailer = retailers.find(r => r.slug === selectedRetailer);
-  const showImportButton = activeRetailer?.scrape_source === 'manual';
-  const showRefreshButton = activeRetailer && activeRetailer.scrape_source !== 'manual' && selectedRetailer !== 'all';
 
   const totalDeals = filteredDeals.length;
   const avgSavings = totalDeals > 0
@@ -142,14 +137,6 @@ export default function DealsPageClient({ deals, retailers, retailerDates, retai
           <div>
             <h1>{headerTitle}</h1>
             <p>{headerSubtitle}</p>
-          </div>
-          <div className="header-actions">
-            {showImportButton && (
-              <button className="import-button" onClick={() => setShowImportModal(true)}>
-                Import Deals
-              </button>
-            )}
-            {showRefreshButton && <RefreshButton retailer={selectedRetailer} />}
           </div>
         </div>
         {flyerDates && selectedRetailer === 'costco' && (
@@ -271,15 +258,6 @@ export default function DealsPageClient({ deals, retailers, retailerDates, retai
         deals={paginatedDeals}
         showRetailer={selectedRetailer === 'all'}
       />
-
-      {showImportModal && activeRetailer && (
-        <ImportModal
-          retailerSlug={activeRetailer.slug}
-          retailerName={activeRetailer.name}
-          onClose={() => setShowImportModal(false)}
-          onSuccess={() => window.location.reload()}
-        />
-      )}
     </>
   );
 }
