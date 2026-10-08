@@ -11,11 +11,12 @@ import { clean } from '../cleaners/lululemon.js';
  * @param {object} options - Isolated environment and launch-options recorder.
  * @returns {Promise<object>} Actual scraper functions in an isolated module.
  */
-async function parser(browser = null, { env = {}, launches = [] } = {}) {
-  const context = vm.createContext({ console, URL, process: { env },
+async function parser(browser = null, { env = {}, launches = [], logs = [] } = {}) {
+  const context = vm.createContext({ console: { log: (...args) => console.log(...args),
+    warn: (...args) => logs.push(args.join(' ')) }, URL, process: { env },
     fetch: () => { throw new Error('Remote I/O forbidden in replay'); }, setTimeout: fn => { fn(); } });
   const source = await fs.readFile(new URL('./lululemon.js', import.meta.url), 'utf8');
-  const module = new vm.SourceTextModule(source + '\nexport { fetchPageData, transformProduct, scrapeSectionPages };', { context });
+  const module = new vm.SourceTextModule(source + '\nexport { fetchPageData, transformProduct, scrapeSectionPages }; const navigation = typeof discoverWmtmPath === "function" ? discoverWmtmPath : undefined; export { navigation as discoverWmtmPath };', { context });
   await module.link(() => new vm.SyntheticModule(['chromium'], function () {
     this.setExport('chromium', { async launch(options) {
       if (!browser) throw new Error('Browser launch forbidden in replay');
@@ -35,16 +36,27 @@ async function parser(browser = null, { env = {}, launches = [] } = {}) {
  * @param {object} context - Isolated JavaScript context.
  * @param {string} html - Public fixture or deliberately invalid HTML.
  * @param {number} status - Simulated HTTP response status.
+ * @param {Array<object>} links - Synthetic Men navigation anchors.
  * @returns {object} Minimal Playwright page evaluate boundary.
  */
-function page(context, html, status = 200) {
+function page(context, html, status = 200, links = [{
+  href: '/en-ca/c/we-made-too-much/n18mhd', text: 'We Made Too Much',
+}]) {
   context.fetch = async () => new Response(html, { status });
   context.document = { getElementById: () => {
     const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
     return match ? { textContent: match[1] } : null;
   } };
+  context.document.body = { innerText: 'Synthetic public response' };
   return {
-    async goto() { return { ok: () => status === 200, status: () => status }; },
+    async goto() { return { ok: () => status === 200, status: () => status,
+      url: () => 'https://shop.lululemon.com/en-ca/c/test' }; },
+    url: () => 'https://shop.lululemon.com/en-ca/',
+    title: async () => 'Synthetic public title',
+    async $$eval(selector, fn) {
+      assert.equal(selector, 'a[data-lll-component-name="hdr_mn:l1_we_made_too_much"]');
+      return fn(links.map(link => ({ getAttribute: () => link?.href, textContent: link?.text })));
+    },
     async waitForSelector() {},
     evaluate: (fn, args) => vm.runInContext(`(${fn.toString()})`, context)(args),
   };
@@ -139,17 +151,19 @@ function paginatedPage(context, catalogs) {
  * @param {object} options - Mode, environment, section-distinct IDs and later failure controls.
  * @returns {Promise<object>} Exit, publication, launch, browser-close and local state evidence.
  */
-async function entrypointReplay(catalogs, { dry = false, failMen = null, env = {}, distinctSections = false } = {}) {
+async function entrypointReplay(catalogs, { dry = false, failFinal = null, env = {}, distinctSections = false,
+  links, failure = null } = {}) {
   let replay;
   let closed = false;
   const browser = {
     async newContext() { return { async newPage() { return replay; } }; },
     async close() { closed = true; },
   };
-  const launches = [];
-  const { api, context } = await parser(browser, { env, launches });
+  const launches = [], diagnostics = [], urls = [];
+  const { api, context } = await parser(browser, { env, launches, logs: diagnostics });
   const { replay: baseReplay, visited } = paginatedPage(context, catalogs);
   replay = baseReplay;
+  if (links !== undefined) replay.$$eval = page(context, html(catalogs[0]), 200, links).$$eval;
   if (distinctSections) {
     replay.goto = async url => {
       const num = Number(new URL(url).searchParams.get('page') || 1);
@@ -164,16 +178,32 @@ async function entrypointReplay(catalogs, { dry = false, failMen = null, env = {
       return { ok: () => true, status: () => 200 };
     };
   }
-  if (failMen) {
+  if (failFinal) {
     const goto = replay.goto;
     replay.goto = async url => {
-      if (new URL(url).pathname.includes('/men-we-made-too-much/')) {
-        page(context, html(failMen));
+      if (Number(new URL(url).searchParams.get('page') || 1) === catalogs.length && new URL(url).pathname.includes('/c/we-made-too-much/')) {
+        page(context, html(failFinal));
         return { ok: () => true, status: () => 200 };
       }
       return goto(url);
     };
   }
+  const goto = replay.goto;
+  replay.goto = async url => {
+    urls.push(url);
+    if (failure && (failure.stage === 'home' ? new URL(url).pathname === '/en-ca/'
+      : new URL(url).pathname.includes('/c/we-made-too-much/'))) {
+      if (failure.unavailable) {
+        replay.title = async () => { throw new Error('Diagnostic title unavailable'); };
+        replay.evaluate = async () => { throw new Error('Diagnostic body unavailable'); };
+      } else {
+        replay.title = async () => failure.title ?? 'Public service error';
+        context.document.body = { innerText: failure.body ?? 'Public request could not be completed' };
+      }
+      return { ok: () => false, status: () => failure.status, url: () => `${url}?token=SYNTHETIC_SECRET#private` };
+    }
+    return goto(url);
+  };
   const prior = [{ product_code: 'prior', product_name: 'Synthetic prior completed publication' }];
   let publication = structuredClone(prior);
   const exits = [], writes = [], errors = [];
@@ -196,7 +226,7 @@ async function entrypointReplay(catalogs, { dry = false, failMen = null, env = {
     }, { context: runtime });
   });
   await module.evaluate();
-  return { exits, writes, errors, publication, prior, closed, launches, visited };
+  return { exits, writes, errors, publication, prior, closed, launches, visited, diagnostics, urls };
 }
 
 /**
@@ -368,7 +398,7 @@ test('visible Chrome requires explicit environment opt-in with isolated launch s
       const env = value === undefined ? {} : { LULULEMON_VISIBLE_CHROME: value };
       const { api, context } = await parser(browser, { env, launches });
       replay = page(context, html(currentData()));
-      assert.equal((await api.scrapeLululemon()).deals.length, 9);
+      assert.equal((await api.scrapeLululemon()).deals.length, 3);
       assert.deepEqual(launches, [{ headless, channel: 'chrome' }]);
       assert.equal(closed, true);
     });
@@ -405,7 +435,7 @@ test('scraper startup uses ordinary browser defaults with no fingerprint masking
   const legacy = { props: { pageProps: { dehydratedState: { queries: [{ queryKey: ['CategoryPageDataQuery'], state: { data: { pages: [{ products: [{ productOnSale: true, productId: 'startup', displayName: 'Synthetic startup control', listPrice: [100], productSalePrice: [75] }], totalProductPages: 1 }] } } }] } } } };
   replay = page(context, html(legacy));
   const result = await api.scrapeLululemon();
-  assert.equal(result.deals.length, 3);
+  assert.equal(result.deals.length, 1);
   assert.equal(closed, true);
 });
 
@@ -710,8 +740,8 @@ test('inventory-drift offline smoke runs happy, negative, then publication state
       assert.deepEqual(result.exits, []);
       assert.equal(result.closed, true);
       assert.equal(result.writes.length, 1);
-      assert.equal(result.publication.length, count * 3);
-      assert.equal(new Set(result.publication.map(d => d.product_code)).size, count * 3);
+      assert.equal(result.publication.length, count);
+      assert.equal(new Set(result.publication.map(d => d.product_code)).size, count);
       assert.deepEqual(result.launches, [{ headless: !visible, channel: 'chrome' }]);
       assert.ok(result.publication.every(d => d.regular_price > d.sale_price && d.sale_price > 0
         && d.brand === 'Lululemon' && d.promo_type === 'We Made Too Much'));
@@ -720,7 +750,7 @@ test('inventory-drift offline smoke runs happy, negative, then publication state
       assert.equal(first.sale_price, 109);
       assert.match(first.image_url, /LW3JCTS_079841_1/);
       successes.push(result);
-      console.log(`DRIFT_SMOKE_HAPPY ${name}: uniqueCADRows=${count * 3} publishCalls=1 headless=${!visible} remoteWrites=0`);
+      console.log(`DRIFT_SMOKE_HAPPY ${name}: uniqueCADRows=${count} publishCalls=1 headless=${!visible} remoteWrites=0`);
     }
   });
   await t.test('phase 2 negative: moving inventory cannot hide bad pagination or repetition', async () => {
@@ -771,12 +801,12 @@ test('inventory-drift offline smoke runs happy, negative, then publication state
       }
       console.log(`DRIFT_SMOKE_NEGATIVE ${name}: rejected both modes publishCalls=0 remoteWrites=0`);
     }
-    // Harder after the first clean pass: fail a later section after all 16
-    // Women pages passed, and test overlap accumulation across multiple pages.
+    // Harder after the first clean pass: truncate the final page after 15 valid
+    // pages, and test overlap accumulation across multiple pages.
     const later = await entrypointReplay(exact, { distinctSections: true,
-      failMen: currentData({ totalCount: 3, products: currentProducts(0, 2) }) });
+      failFinal: currentData({ totalCount: 607, offset: 600, products: currentProducts(600, 6) }) });
     assert.deepEqual(later.exits, [1]);
-    assert.match(later.errors[0], /men-we-made-too-much.*Incomplete catalog products/);
+    assert.match(later.errors[0], /we-made-too-much.*page 16.*Incomplete catalog products/);
     assert.equal(later.writes.length, 0);
     rejected.push(later);
     const cumulative = driftingCatalogs([600, 601, 601]);
@@ -788,7 +818,7 @@ test('inventory-drift offline smoke runs happy, negative, then publication state
     assert.match(accumulated.errors[0], /Repeated catalog product/);
     assert.equal(accumulated.writes.length, 0);
     rejected.push(accumulated);
-    console.log('DRIFT_SMOKE_NEGATIVE harder: later section after complete drift traversal and cumulative overlap19 rejected publishCalls=0 remoteWrites=0');
+    console.log('DRIFT_SMOKE_NEGATIVE harder: truncated final page after 15 valid pages and cumulative overlap19 rejected publishCalls=0 remoteWrites=0');
   });
   await t.test('phase 3 state: prior publication preserved on failure, successful IDs and launch verified', () => {
     assert.equal(successes.length, 6);
@@ -826,7 +856,7 @@ test('offline entrypoint smoke completes happy, negative, then state verificatio
       const result = await entrypointReplay(catalogs);
       assert.deepEqual(result.exits, []);
       assert.equal(result.writes.length, 1);
-      assert.equal(result.writes[0].length, 6, 'Two filtered deals per section, across three complete sections');
+      assert.equal(result.writes[0].length, 2, 'Two filtered deals in the complete unfiltered collection');
       assert.ok(result.writes[0].every(d => d.brand === 'Lululemon' && d.promo_type === 'We Made Too Much'));
       assert.equal(result.closed, true);
       successes.push(result);
@@ -869,13 +899,15 @@ test('offline entrypoint smoke completes happy, negative, then state verificatio
       }
       console.log(`SMOKE_NEGATIVE ${name}: rejected in both modes; publishCalls=0 remoteWrites=0`);
     }
-    // Stronger counterfactual: a later section fails after an earlier one completed.
-    const laterFailure = await entrypointReplay(completeCurrent, { failMen: truncated });
+    // Stronger counterfactual: the final page fails after a valid first page.
+    const laterFailure = await entrypointReplay(completeCurrent, {
+      failFinal: currentData({ totalCount: 5, limit: 3, offset: 3, products: currentProducts(3, 1) }),
+    });
     assert.deepEqual(laterFailure.exits, [1]);
     assert.equal(laterFailure.writes.length, 0);
-    assert.match(laterFailure.errors[0], /men-we-made-too-much.*Incomplete catalog products/);
-    rejected.push({ name: 'later section truncation', dry: false, result: laterFailure });
-    console.log('SMOKE_NEGATIVE later section truncation: Women completed; Men rejected; publishCalls=0 remoteWrites=0');
+    assert.match(laterFailure.errors[0], /we-made-too-much.*page 2.*Incomplete catalog products/);
+    rejected.push({ name: 'final page truncation', dry: false, result: laterFailure });
+    console.log('SMOKE_NEGATIVE final page truncation: first page completed; final page rejected; publishCalls=0 remoteWrites=0');
   });
   await t.test('phase 3 state: failure leaves prior local publication unchanged', () => {
     assert.equal(successes.length, 2);
@@ -889,5 +921,221 @@ test('offline entrypoint smoke completes happy, negative, then state verificatio
       assert.equal(result.writes.length, 0, name);
     });
     console.log(`SMOKE_STATE successfulReplacements=${successes.length} rejectedPriorSnapshotsUnchanged=${rejected.length} persistenceCallsOnFailure=0 remoteWrites=0`);
+  });
+});
+
+const menPath = '/en-ca/c/we-made-too-much/n18mhd';
+const verifiedFutureMenPath = '/en-ca/c/we-made-too-much/synthetic123';
+
+test('non-OK diagnostics retain status and safe final URL with capped readable content', async t => {
+  for (const status of [400, 403, 404, 429, 500, 503]) {
+    await t.test(`HTTP ${status}`, async () => {
+      const logs = [];
+      const { api, context } = await parser(null, { logs });
+      const replay = page(context, '', status);
+      replay.goto = async () => ({ ok: () => false, status: () => status,
+        url: () => `https://shop.lululemon.com${menPath}?token=SYNTHETIC_SECRET#private` });
+      replay.title = async () => `Public error ${status} ${'word '.repeat(100)}`;
+      await assert.rejects(api.fetchPageData(replay, menPath, 1), new RegExp(`page 1: HTTP ${status}$`));
+      assert.equal(logs.length, 1);
+      assert.match(logs[0], new RegExp(`HTTP ${status}`));
+      assert.ok(logs[0].includes(`final URL=https://shop.lululemon.com${menPath}`));
+      const text = logs[0].split('title=')[1];
+      assert.ok(text.startsWith(`Public error ${status}`));
+      assert.equal(text.length, 300);
+      assert.doesNotMatch(logs[0], /SYNTHETIC_SECRET|token=|#private|bot block|bad path/i);
+    });
+  }
+});
+
+test('non-OK diagnostics fallback, redaction and diagnostic failures preserve the HTTP error', async t => {
+  for (const [name, title, body] of [
+    ['empty title reads body', '', 'Public request failed GE401001'],
+    ['unavailable title reads body', null, 'Public request failed GE401001'],
+    ['unexpected title reads body', {}, 'Public request failed GE401001'],
+    ['unavailable body', null, null],
+    ['unexpected body type', null, {}],
+    ['capped body', '', `Public ${'word '.repeat(500)}`],
+    ['quoted sensitive body keys', '', '{"message":"Public request failed", "token":"SYNTHETIC_SECRET", "session_id":"SYNTHETIC_SECRET", "password":"synthetic password"}'],
+    ['redact public error values', '', 'Public failure token=SYNTHETIC_SECRET password="synthetic password" Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456 email=user@example.test https://user:pass@shop.lululemon.com/en-ca/?session=SYNTHETIC_SECRET#private'],
+  ]) {
+    await t.test(name, async () => {
+      const logs = [];
+      const { api, context } = await parser(null, { logs });
+      const replay = page(context, '', 400);
+      replay.title = async () => { if (title === null) throw new Error('Title unavailable'); return title; };
+      context.document.body = { innerText: body };
+      if (body === null) replay.evaluate = async () => { throw new Error('Body unavailable'); };
+      await assert.rejects(api.fetchPageData(replay, menPath, 1), /page 1: HTTP 400$/);
+      assert.equal(logs.length, 1);
+      assert.match(logs[0], /HTTP 400.*final URL=/);
+      assert.doesNotMatch(logs[0], /SYNTHETIC_SECRET|synthetic password|abcdefghijklmnopqrstuvwxyz123456|user@example.test|user:pass|#private/);
+      if (typeof body === 'string') {
+        assert.match(logs[0], /body=.*Public/);
+        assert.ok(logs[0].split('body=')[1].length <= 300);
+        if (name === 'capped body') assert.equal(logs[0].split('body=')[1].length, 300);
+      } else assert.match(logs[0], /unavailable/);
+    });
+  }
+  await t.test('missing response is fatal with bounded diagnostics', async () => {
+    const logs = [];
+    const { api, context } = await parser(null, { logs });
+    const replay = page(context, '');
+    replay.goto = async () => null;
+    await assert.rejects(api.fetchPageData(replay, menPath, 1), /HTTP unknown$/);
+    assert.match(logs[0], /HTTP unknown.*final URL=unavailable/);
+  });
+  await t.test('unavailable final URL and broken logger do not replace failure', async () => {
+    const { api, context } = await parser();
+    const replay = page(context, '', 429);
+    replay.goto = async () => ({ ok: () => false, status: () => 429, url: () => { throw new Error('URL unavailable'); } });
+    context.console.warn = () => { throw new Error('Logger unavailable'); };
+    await assert.rejects(api.fetchPageData(replay, menPath, 2), /page 2: HTTP 429$/);
+  });
+  await t.test('off-origin redirect hides credentials and private path values', async () => {
+    const logs = [];
+    const { api, context } = await parser(null, { logs });
+    const replay = page(context, '', 403);
+    replay.goto = async () => ({ ok: () => false, status: () => 403,
+      url: () => 'https://user:pass@elsewhere.example/private/SYNTHETIC_SECRET?code=SYNTHETIC_SECRET#private' });
+    await assert.rejects(api.fetchPageData(replay, menPath, 1), /HTTP 403$/);
+    assert.match(logs[0], /final URL=https:\/\/elsewhere.example\/\[redacted path\]/);
+    assert.doesNotMatch(logs[0], /SYNTHETIC_SECRET|user:pass|code=|#private/);
+  });
+});
+
+test('WMTM navigation discovery trusts only the current Canadian unfiltered header sale link', async t => {
+  for (const href of [verifiedFutureMenPath, `https://shop.lululemon.com${verifiedFutureMenPath}?icid=public-marketing`]) {
+    await t.test(`trusted ${href}`, async () => {
+      const { api, context } = await parser();
+      const replay = page(context, '', 200, [{ href, text: 'We Made Too Much' }, { href, text: ' We Made Too Much ' }]);
+      assert.equal(await api.discoverWmtmPath(replay), verifiedFutureMenPath);
+    });
+  }
+  for (const [name, links, source] of [
+    ['ambiguous', [{ href: menPath, text: 'We Made Too Much' }, { href: verifiedFutureMenPath, text: 'We Made Too Much' }], undefined],
+    ['wrong locale', [{ href: '/en-us/c/we-made-too-much/synthetic123', text: 'We Made Too Much' }], undefined],
+    ['wrong section', [{ href: '/en-ca/c/women-we-made-too-much/synthetic123', text: 'We Made Too Much' }], undefined],
+    ['subcategory', [{ href: '/en-ca/c/we-made-too-much-pants/synthetic123', text: 'We Made Too Much' }], undefined],
+    ['off origin', [{ href: `https://elsewhere.example${verifiedFutureMenPath}`, text: 'We Made Too Much' }], undefined],
+    ['credentials', [{ href: `https://user:pass@shop.lululemon.com${verifiedFutureMenPath}`, text: 'We Made Too Much' }], undefined],
+    ['wrong label', [{ href: verifiedFutureMenPath, text: 'Women' }], undefined],
+    ['null href', [{ href: null, text: 'We Made Too Much' }], undefined],
+    ['unexpected href', [{ href: {}, text: 'We Made Too Much' }], undefined],
+    ['unexpected label', [{ href: verifiedFutureMenPath, text: {} }], undefined],
+    ['javascript', [{ href: 'javascript:alert(1)', text: 'We Made Too Much' }], undefined],
+    ['malformed URL', [{ href: 'https://[invalid', text: 'We Made Too Much' }], undefined],
+    ['filtered collection', [{ href: `${verifiedFutureMenPath}?page=2`, text: 'We Made Too Much' }], undefined],
+    ['non-Canada source', [{ href: verifiedFutureMenPath, text: 'We Made Too Much' }], 'https://shop.lululemon.com/en-us/'],
+    ['off-origin source', [{ href: verifiedFutureMenPath, text: 'We Made Too Much' }], 'https://elsewhere.example/en-ca/'],
+  ]) {
+    await t.test(name, async () => {
+      const { api, context } = await parser();
+      const replay = page(context, '', 200, links);
+      if (source) replay.url = () => source;
+      await assert.rejects(api.discoverWmtmPath(replay), /Lululemon WMTM navigation/);
+    });
+  }
+});
+
+test('WMTM browser setup failures close acquired resources', async () => {
+  for (const stage of ['context', 'page']) {
+    let closed = false;
+    const browser = {
+      async newContext() {
+        if (stage === 'context') throw new Error('Synthetic context failure');
+        return { async newPage() { throw new Error('Synthetic page failure'); } };
+      },
+      async close() { closed = true; },
+    };
+    const { api } = await parser(browser);
+    await assert.rejects(api.scrapeLululemon(), /Synthetic (context|page) failure/);
+    assert.equal(closed, true);
+  }
+});
+
+test('WMTM missing homepage link uses saved fallback before navigation only', async () => {
+  const result = await entrypointReplay([currentData()], { dry: true, links: [] });
+  assert.deepEqual(result.exits, []);
+  assert.ok(result.urls.includes('https://shop.lululemon.com' + menPath));
+  assert.equal(result.writes.length, 0);
+  assert.equal(result.closed, true);
+  const refusal = await entrypointReplay([currentData()], { dry: true, links: [], failure: { stage: 'catalog', status: 400 } });
+  assert.deepEqual(refusal.exits, [1]);
+  assert.equal(refusal.urls.filter(url => url.includes(menPath)).length, 1);
+  assert.match(refusal.errors[0], /https:\/\/shop.lululemon.com\/en-ca\/c\/we-made-too-much\/n18mhd.*HTTP 400/);
+});
+
+test('WMTM zero products reject with the exact URL and retained previous publication', async () => {
+  const result = await entrypointReplay([currentData({ totalCount: 0, products: [] })], { dry: true });
+  assert.deepEqual(result.exits, [1]);
+  assert.match(result.errors[0], /https:\/\/shop.lululemon.com\/en-ca\/c\/we-made-too-much\/n18mhd.*Empty or malformed catalog products/);
+  assert.deepEqual(result.publication, result.prior);
+  assert.equal(result.closed, true);
+});
+
+test('WMTM navigation offline smoke runs happy, negative, then unchanged publication state', async t => {
+  const successes = [], rejected = [];
+  const links = [{ href: verifiedFutureMenPath, text: 'We Made Too Much' }];
+  await t.test('phase 1 happy: discovered link through actual scraper, cleaner and entrypoint', async () => {
+    for (const dry of [false, true]) {
+      const result = await entrypointReplay([currentData()], { dry, links });
+      assert.deepEqual(result.exits, []);
+      assert.equal(result.writes.length, dry ? 0 : 1);
+      assert.ok(result.urls.includes(`https://shop.lululemon.com${verifiedFutureMenPath}`));
+      assert.equal(result.urls.some(url => url.includes(menPath)), false);
+      assert.equal(result.closed, true);
+      successes.push(result);
+      console.log(`MEN_SMOKE_HAPPY dry=${dry} discoveredPathUsed=true cleanedRows=3 publishCalls=${result.writes.length} browserClosed=true remoteWrites=0`);
+    }
+  });
+  await t.test('phase 2 negative: refusals, bad navigation and retained completeness rejection', async () => {
+    for (const [name, options, message] of [
+      ...[400, 403, 429, 500, 503].map(status => [`WMTM HTTP ${status}`, { links, failure: { stage: 'catalog', status } }, new RegExp(`HTTP ${status}`)]),
+      ['home HTTP 403', { failure: { stage: 'home', status: 403 } }, /HTTP 403/],
+      ['catalog HTTP 404', { failure: { stage: 'catalog', status: 404 } }, /HTTP 404/],
+      ['unavailable diagnostics', { links, failure: { stage: 'catalog', status: 400, unavailable: true } }, /HTTP 400/],
+      ['ambiguous link', { links: [...links, { href: menPath, text: 'We Made Too Much' }] }, /Lululemon WMTM navigation/],
+      ['off-origin link', { links: [{ href: `https://elsewhere.example${verifiedFutureMenPath}`, text: 'We Made Too Much' }] }, /Lululemon WMTM navigation/],
+      ['retained short raw page', { failFinal: currentData({ totalCount: 3, products: currentProducts(0, 2) }) }, /Incomplete catalog products/],
+    ]) {
+      for (const dry of [false, true]) {
+        const result = await entrypointReplay([currentData()], { ...options, dry });
+        assert.deepEqual(result.exits, [1], name);
+        assert.match(result.errors[0], message, name);
+        assert.equal(result.writes.length, 0, name);
+        assert.equal(result.closed, true, name);
+        if (options.failure) {
+          assert.equal(result.diagnostics.length, 1, name);
+          assert.match(result.diagnostics[0], /HTTP.*final URL=/);
+          assert.doesNotMatch(result.diagnostics[0], /SYNTHETIC_SECRET|token=|#private/);
+        }
+        rejected.push(result);
+      }
+      console.log(`MEN_SMOKE_NEGATIVE ${name}: rejected both modes publishCalls=0 browserClosed=true remoteWrites=0`);
+    }
+    // Harder after a clean negative pass: a conflicting bad link must not be ignored
+    // just because one valid link exists, and failed collection requests must not retry.
+    const mixed = await entrypointReplay([currentData()], { links: [...links, { href: '/en-us/c/we-made-too-much/synthetic123', text: 'We Made Too Much' }] });
+    assert.deepEqual(mixed.exits, [1]);
+    assert.match(mixed.errors[0], /Lululemon WMTM navigation/);
+    rejected.push(mixed);
+    rejected.filter(result => result.errors[0].includes('page 1: HTTP')).forEach(result => {
+      assert.ok(result.urls.filter(url => url.includes('/c/we-made-too-much/')).length <= 1);
+      assert.equal(result.urls.some(url => /(?:men|women)-we-made-too-much|we-made-too-much-accessories/.test(url)), false);
+    });
+    console.log('MEN_SMOKE_NEGATIVE harder: mixed invalid link rejected; no refusal retry; no separate gender or accessory request after collection failure');
+  });
+  await t.test('phase 3 state: failed sections preserve prior synthetic publication and close browser', () => {
+    assert.equal(rejected.length, 23);
+    rejected.forEach(result => {
+      assert.deepEqual(result.publication, result.prior);
+      assert.equal(result.writes.length, 0);
+      assert.equal(result.closed, true);
+    });
+    assert.deepEqual(successes[0].publication, structuredClone(successes[0].writes[0]));
+    assert.equal(successes[0].publication.length, 3);
+    assert.deepEqual(successes[1].publication, successes[1].prior);
+    console.log('MEN_SMOKE_STATE successfulReplacementRows=3 successfulDryRunsUnchanged=1 rejectedPriorSnapshotsUnchanged=23 browserClosedAll=true remoteWrites=0');
   });
 });

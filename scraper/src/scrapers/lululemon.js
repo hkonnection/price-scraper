@@ -4,7 +4,7 @@
  * Uses ordinary Playwright navigation to read paginated public Canada
  * product data from __NEXT_DATA__ JSON embedded in each page.
  *
- * Covers three WMTM sections: Women, Men, and Accessories.
+ * Uses the unfiltered WMTM collection for Women, Men, and Accessories.
  */
 
 import { chromium } from 'playwright';
@@ -13,25 +13,15 @@ const BASE_URL = 'https://shop.lululemon.com';
 // Initial-section anchor, rounded down: no cumulative widening on later pages.
 const MAX_SECTION_DRIFT_RATIO = 0.03;
 
-const WMTM_SECTIONS = [
-  {
-    name: 'Women',
-    path: '/en-ca/c/women-we-made-too-much/n16o10z8mhd',
-  },
-  {
-    name: 'Men',
-    path: '/en-ca/c/men-we-made-too-much/n18mhdznrqw',
-  },
-  {
-    name: 'Accessories',
-    path: '/en-ca/c/we-made-too-much-accessories/n14w56z8mhd',
-  },
-];
+// Used only before navigation when the homepage has no sale link.
+const SAVED_WMTM_PATH = '/en-ca/c/we-made-too-much/n18mhd';
 
 /**
  * Scrapes all WMTM deals from lululemon Canada.
  * Launches Chrome with normal browser defaults and navigates each WMTM page.
  * Set LULULEMON_VISIBLE_CHROME=1 for visible Chrome; all other values stay headless.
+ * Reads the unfiltered sale link from the Canadian header on each run.
+ * A missing link permits the saved fallback before navigation, never after refusal.
  * Does not mask fingerprints or solve retailer challenges.
  *
  * @returns {Promise<{deals: Array<object>, totalProducts: number, sections: Array<object>}>}
@@ -43,31 +33,22 @@ export async function scrapeLululemon() {
     headless: process.env.LULULEMON_VISIBLE_CHROME !== '1',
     channel: 'chrome',
   });
-  const context = await browser.newContext();
-  const page = await context.newPage();
-
   const allDeals = [];
   const sectionSummaries = [];
 
   try {
-    // Navigate to homepage first to establish cookies, then go to WMTM
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    // Navigate to homepage first to establish cookies, then go to WMTM.
     console.log('Navigating to lululemon homepage...');
-    await page.goto(`${BASE_URL}/en-ca/`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 60000,
-    });
+    await navigatePage(page, `${BASE_URL}/en-ca/`);
     await new Promise((resolve) => setTimeout(resolve, 2000));
-
-    const firstUrl = `${BASE_URL}${WMTM_SECTIONS[0].path}`;
-    console.log(`Navigating to ${firstUrl}...`);
-    await page.goto(firstUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-    // Wait for __NEXT_DATA__ to be attached (script tags are never "visible")
-    await page.waitForSelector('#__NEXT_DATA__', { state: 'attached', timeout: 30000 });
+    const path = await discoverWmtmPath(page);
     console.log('Session established.\n');
 
-    // Scrape each WMTM section
-    for (const section of WMTM_SECTIONS) {
+    // The site's unfiltered collection includes Women, Men and Accessories.
+    // Do not infer gender labels from the request path or product names.
+    for (const section of [{ name: 'We Made Too Much', path }]) {
       console.log(`--- Scraping ${section.name} WMTM ---`);
       const sectionDeals = await scrapeSectionPages(page, section);
       allDeals.push(...sectionDeals);
@@ -93,6 +74,111 @@ export async function scrapeLululemon() {
     totalProducts: allDeals.length,
     sections: sectionSummaries,
   };
+}
+
+/**
+ * Reads only the site's unfiltered header sale link on an ordinary Canadian page.
+ * Allows identical duplicate links and a saved fallback only when the link is absent.
+ * Invalid or conflicting marked links fail before any collection navigation.
+ * @param {import('playwright').Page} page - Loaded Canadian retailer homepage.
+ * @returns {Promise<string>} Same-origin unfiltered Canada collection path.
+ * @throws {Error} When the source or any marked link is not trustworthy.
+ */
+async function discoverWmtmPath(page) {
+  try {
+    const source = new URL(page.url());
+    if (source.origin !== BASE_URL || !source.pathname.startsWith('/en-ca/')) throw new Error();
+    const selector = 'a[data-lll-component-name="hdr_mn:l1_we_made_too_much"]';
+    const links = await page.$$eval(selector, anchors => anchors.map(anchor => ({
+      href: anchor.getAttribute('href'), text: anchor.textContent,
+    })));
+    if (!Array.isArray(links)) throw new Error();
+    if (links.length === 0) {
+      console.log(`WMTM link source=saved fallback; URL=${BASE_URL}${SAVED_WMTM_PATH}`);
+      return SAVED_WMTM_PATH;
+    }
+    const paths = new Set();
+    for (const link of links) {
+      if (typeof link?.href !== 'string' || typeof link.text !== 'string' ||
+          link.text.replace(/\s+/g, ' ').trim() !== 'We Made Too Much') throw new Error();
+      const url = new URL(link.href, BASE_URL);
+      if (url.origin !== BASE_URL || url.username || url.password ||
+          !/^\/en-ca\/c\/we-made-too-much\/[a-z0-9]+$/.test(url.pathname) ||
+          [...url.searchParams.keys()].some(key => key !== 'icid')) throw new Error();
+      paths.add(url.pathname);
+    }
+    if (paths.size !== 1) throw new Error();
+    const path = [...paths][0];
+    console.log(`WMTM link source=discovered; URL=${BASE_URL}${path}`);
+    return path;
+  } catch {
+    throw new Error('Lululemon WMTM navigation: invalid or ambiguous Canada sale link');
+  }
+}
+
+/**
+ * Retains only public Canada collection paths in diagnostic URLs.
+ * Drops credentials, query values, fragments and unrecognized private paths.
+ * @param {unknown} value - Final response URL or URL in public error text.
+ * @returns {string} Safe bounded destination evidence, or unavailable.
+ */
+function diagnosticUrl(value) {
+  try {
+    if (typeof value !== 'string') return 'unavailable';
+    const url = new URL(value);
+    if (!['https:', 'http:'].includes(url.protocol)) return 'unavailable';
+    const publicPath = url.origin === BASE_URL &&
+      /^\/en-ca\/(?:c\/[a-z0-9-]+\/[a-z0-9]+)?$/.test(url.pathname);
+    return `${url.origin}${publicPath ? url.pathname : '/[redacted path]'}`.slice(0, 300);
+  } catch { return 'unavailable'; }
+}
+
+/**
+ * Normalizes and caps public title/body evidence while masking reflected values.
+ * @param {unknown} value - Plain readable title or body prefix, never page JSON.
+ * @returns {string} At most 300 readable characters without common secret values.
+ */
+function diagnosticText(value) {
+  if (typeof value !== 'string') return '';
+  return value
+    .replace(/["']?[\w.-]*(?:token|secret|password|cookie|authorization|session|api[_-]?key)[\w.-]*["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi, '[redacted value]')
+    .replace(/https?:\/\/[^\s<>"']+/gi, diagnosticUrl)
+    .replace(/\bBearer\s+\S+/gi, '[redacted]')
+    .replace(/\b[\w.-]+\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/g, '[redacted value]')
+    .replace(/[\w.+-]+@[\w.-]+\.[a-z]+/gi, '[redacted email]')
+    .replace(/[a-z0-9_-]{24,}/gi, '[redacted]')
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/\s+/g, ' ').trim().slice(0, 300);
+}
+
+/**
+ * Navigates once and records bounded, sanitized evidence for a non-OK response.
+ * Diagnostics are best effort; their failure cannot replace the fatal HTTP error.
+ * @param {import('playwright').Page} page - Ordinary browser page.
+ * @param {string} url - Trusted public destination.
+ * @returns {Promise<void>} Resolves only for an OK navigation response.
+ * @throws {Error} On transport failure or a non-OK HTTP response, without retry.
+ */
+async function navigatePage(page, url) {
+  const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  if (response?.ok()) return;
+  const status = response?.status() ?? 'unknown';
+  let finalUrl = 'unavailable', text = '', kind = 'title';
+  try { finalUrl = diagnosticUrl(response?.url()); } catch { /* Keep the HTTP failure. */ }
+  try { text = diagnosticText(await page.title()); } catch { /* Read body if title is unavailable. */ }
+  if (!text) {
+    kind = 'body';
+    try {
+      text = diagnosticText(await page.evaluate(() => {
+        const body = document.body?.innerText;
+        return typeof body === 'string' ? body.slice(0, 1500) : '';
+      }));
+    } catch { /* Diagnostics are optional, not a second failure. */ }
+  }
+  try {
+    console.warn(`Lululemon HTTP ${status}: final URL=${finalUrl}; ${kind}=${text || 'unavailable'}`);
+  } catch { /* A failed logger must not hide the original status. */ }
+  throw new Error(`HTTP ${status}`);
 }
 
 /**
@@ -182,6 +268,7 @@ async function scrapeSectionPages(page, section) {
 /**
  * Navigates to a single WMTM page and reads its embedded public NEXT_DATA.
  * Validates legacy/current catalog schemas, page offsets and raw reference counts.
+ * Non-OK navigation logs safe bounded evidence and still rejects the whole run.
  *
  * @param {import('playwright').Page} page - Playwright page with active session
  * @param {string} sectionPath - URL path for the WMTM section
@@ -192,8 +279,7 @@ async function scrapeSectionPages(page, section) {
 async function fetchPageData(page, sectionPath, pageNum) {
   try {
     const url = `${BASE_URL}${sectionPath}${pageNum === 1 ? '' : `?page=${pageNum}`}`;
-    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    if (!response?.ok()) throw new Error(`HTTP ${response?.status() ?? 'unknown'}`);
+    await navigatePage(page, url);
     await page.waitForSelector('#__NEXT_DATA__', { state: 'attached', timeout: 30000 });
     const result = await page.evaluate(
       ({ num }) => {
@@ -246,7 +332,7 @@ async function fetchPageData(page, sectionPath, pageNum) {
 
     return result;
   } catch (err) {
-    throw new Error(`Lululemon ${sectionPath} page ${pageNum}: ${err.message}`);
+    throw new Error(`Lululemon ${BASE_URL}${sectionPath}${pageNum === 1 ? '' : `?page=${pageNum}`} page ${pageNum}: ${err.message}`);
   }
 }
 
