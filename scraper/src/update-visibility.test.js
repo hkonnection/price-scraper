@@ -33,7 +33,14 @@ async function database() {
   insert.run(14,402,'expired','Synthetic expired',1,'2000-01-01');
   insert.run(15,null,'hidden','Synthetic disabled',1,null);
   const queries = [];
-  const facade = { prepare(sql) {
+  const facade = {
+    /** Execute the website's read-only batch in one isolated transaction. */
+    async batch(statements) {
+      db.exec('BEGIN');
+      try { return await Promise.all(statements.map(statement => statement.all())); }
+      finally { db.exec('ROLLBACK'); }
+    },
+    prepare(sql) {
     assert.match(sql.trim(), /^SELECT/i, 'Website must never persist');
     queries.push(sql);
     let params = [];

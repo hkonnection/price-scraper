@@ -24,7 +24,14 @@ function fixture() {
     (15,103,'mixed','Synthetic mixed age price',100,75,25,25,'2026-07-01T11:00:00Z','Other'),
     (16,104,'paused','Synthetic paused price',100,75,25,25,'2026-07-01T11:00:00Z','Other');`);
   const queries = [];
-  const facade = { prepare(sql) {
+  const facade = {
+    /** Execute the complete read page within one isolated transaction. */
+    async batch(statements) {
+      db.exec('BEGIN');
+      try { return await Promise.all(statements.map(statement => statement.all())); }
+      finally { db.exec('ROLLBACK'); }
+    },
+    prepare(sql) {
     assert.match(sql.trim(), /^SELECT/i, 'Reader must not write');
     queries.push(sql);
     let params = [];

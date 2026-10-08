@@ -49,7 +49,8 @@ test('selected publication, failed attempts, legacy rows and mixed store ages re
     assert.equal(result.retailerPaused.indigo, true);
     const html = await pageHTML(facade);
     assert.match(html, /Last published:/);
-    assert.match(html, /Limited selection/);
+    assert.match(html, /Paged results across retailers/);
+    assert.doesNotMatch(html, /Limited selection|2,000 loaded rows/);
     assert.match(html, /Collection paused/);
     assert.match(html, /Observed \(legacy\)/);
     assert.match(html, /Actions run history/);

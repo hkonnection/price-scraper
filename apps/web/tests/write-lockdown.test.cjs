@@ -66,7 +66,12 @@ function fixture() {
         async run() { state.mutations++; return db.prepare(sql).run(...params); },
       };
     },
-    async batch(statements) { return Promise.all(statements.map(statement => statement.run())); },
+    /** Execute the website's read-only batch without counting SELECT as a mutation. */
+    async batch(statements) {
+      db.exec('BEGIN');
+      try { return await Promise.all(statements.map(statement => statement.all())); }
+      finally { db.exec('ROLLBACK'); }
+    },
   };
   return { db, state, env: { DB: facade, GITHUB_TOKEN: 'synthetic-not-a-credential' } };
 }
