@@ -56,6 +56,34 @@ test('real client controls request server filters, sizes, offsets, sorts and pub
   assert.equal(query.get('retailer'),'all');assert.equal(query.get('category'),'all');assert.equal(query.get('promo'),'all');assert.equal(query.has('publication'),false);
 });
 
+/** Verify every retained header matches its cells without publication timestamps. */
+test('real table omits publication cells and aligns single-store and all-store columns',()=>{
+  const base={product_name:'Synthetic product',category:'Other',regular_price:100,sale_price:20,savings_amount:80,savings_percent:80,in_stock:1,retailer_slug:'costco',retailer_name:'Synthetic Costco'};
+  const deals=[
+    {...base,id:1,scrape_id:10,published_at:'2026-10-01T12:00:00Z',scraped_at:'2026-09-30'},
+    {...base,id:2,scrape_id:10,published_at:null,scraped_at:'bad'},
+    {...base,id:3,scrape_id:null,published_at:null,scraped_at:'2026-06-01'},
+  ];
+  for(const showRetailer of [false,true]) {
+    const tree=nodes(component('DealsTable.tsx',[])({deals,showRetailer,sortKey:'sale_price',sortDirection:'desc',pending:false,onSort:()=>{}}));
+    const headers=tree.filter(node=>node.type==='th').map(node=>node.props.children);
+    assert.deepEqual(headers,[...(showRetailer?['Retailer']:[]),'Product','Category','Regular','Sale','$ Off','% Off']);
+    const rows=tree.filter(node=>node.type==='tr').slice(1);
+    assert.equal(rows.length,deals.length);
+    for(const row of rows) {
+      const cells=nodes(row).filter(node=>node.type==='td');
+      assert.equal(cells.length,headers.length);
+      const contents=cells.map(cell=>nodes(cell).flatMap(node=>node.props?.children).filter(value=>typeof value==='string').join(''));
+      assert.deepEqual(contents,[...(showRetailer?['Synthetic Costco']:[]),'Synthetic product','Other','$100.00','$20.00','$80.00','80%']);
+      assert.ok(!nodes(row).some(node=>node.props?.className==='updated-cell'));
+    }
+    assert.doesNotMatch(JSON.stringify(tree),/Publication \/ observation|Last published:|Observed \(legacy\):|2026-/);
+    const empty=nodes(component('DealsTable.tsx',[])({deals:[],showRetailer,sortKey:'sale_price',sortDirection:'desc',pending:false,onSort:()=>{}}));
+    assert.equal(empty.filter(node=>node.type==='table').length,0);
+    assert.ok(empty.some(node=>node.type==='p'&&node.props.children.includes('No deals found')));
+  }
+});
+
 test('real table sends sort changes instead of sorting the current page',()=>{
   const sorts=[]; const deal={id:2,product_name:'Synthetic',category:'Other',regular_price:100,sale_price:20,savings_amount:80,savings_percent:80,in_stock:1};
   const tree=nodes(component('DealsTable.tsx',[])( {deals:[deal],lastUpdated:null,sortKey:'sale_price',sortDirection:'desc',pending:false,onSort:(...args)=>sorts.push(args)} ));
