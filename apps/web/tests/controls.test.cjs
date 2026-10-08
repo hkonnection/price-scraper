@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 
-/** Load real client components with deterministic hooks and navigation recording. */
+/** Load real components and publication formatters with deterministic hooks. */
 function component(file, navigations) {
   const exports = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname,'../src/app/components',file),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText, {
@@ -13,11 +13,12 @@ function component(file, navigations) {
     require(name) {
       if(name==='react') return {useState:value=>[value,()=>{}],useTransition:()=>[false,callback=>callback()]};
       if(name==='next/navigation') return {useRouter:()=>({replace:url=>navigations.push(url)})};
+      if(name==='../publication') return component('../publication.ts',navigations);
       if(name==='react/jsx-runtime') return {jsx:(type,props)=>({type,props}),jsxs:(type,props)=>({type,props}),Fragment:'fragment'};
       return {default:file==='DealsPageClient.tsx'&&name==='./DealsTable'?'tableComponent':'unused'};
     },
   });
-  return exports.default;
+  return file.endsWith('.tsx') ? exports.default : exports;
 }
 
 /** Walk a rendered JSX tree to find controls. */

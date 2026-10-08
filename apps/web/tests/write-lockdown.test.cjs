@@ -16,7 +16,7 @@ const root = path.resolve(__dirname, '../../..');
 const app = path.join(root, 'apps/web/src/app');
 
 /**
- * Loads actual TS/TSX source with isolated request and navigation boundaries.
+ * Loads actual TS/TSX source and relative modules with isolated request boundaries.
  * @param {string} filename - Source file to evaluate.
  * @param {object} mocks - Explicit dependency and global mocks.
  * @returns {object} CommonJS exports from the real source.
@@ -30,10 +30,15 @@ function load(filename, mocks = {}) {
   const exports = {};
   vm.runInNewContext(output, { exports, Response, Request, console,
     fetch: mocks.fetch || (() => { throw new Error('Remote I/O forbidden'); }),
+    /** Resolve only mocked platform dependencies, React, and local TS/TSX modules. */
     require(name) {
       if (Object.hasOwn(mocks, name)) return mocks[name];
       if (name === 'react' || name === 'react/jsx-runtime') return require(name);
-      if (name.startsWith('./')) return load(path.resolve(path.dirname(filename), name + '.tsx'), mocks);
+      if (name.startsWith('.')) {
+        const base = path.resolve(path.dirname(filename), name);
+        const resolved = [base, base + '.ts', base + '.tsx'].find(file => fs.existsSync(file) && fs.statSync(file).isFile());
+        if (resolved) return load(resolved, mocks);
+      }
       throw new Error(`Unexpected dependency: ${name}`);
     },
   }, { filename });

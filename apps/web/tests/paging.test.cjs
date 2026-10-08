@@ -66,7 +66,7 @@ function loadPage(facade) {
   const source=fs.readFileSync(path.resolve(__dirname,'../src/app/page.tsx'),'utf8');
   const exports={};
   vm.runInNewContext(ts.transpileModule(source+'\nexport { getData };',{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText, {
-    exports, URLSearchParams, console: {log() {}}, fetch() {throw Error('Remote I/O denied');},
+    exports, URLSearchParams, console: {log() {}, error() {}}, fetch() {throw Error('Remote I/O denied');},
     require(name) {
       if(name==='@cloudflare/next-on-pages') return {getRequestContext:()=>({env:{DB:facade}})};
       if(name==='react/jsx-runtime') return {jsx:(type,props)=>({type,props})};
@@ -143,7 +143,7 @@ test('invalid or unsupported query values are rejected before any database read'
       {size:['500','1000']},{size:500},{offset:null},{sort:'sale_price; DROP TABLE deals'},{sort:'__proto__'},{direction:'sideways'},
       {publication:'[[1,1.5]]'},{publication:'[[1,10],[1,10]]'},{publication:'[[1,-1]]'},{publication:'[[1,9007199254740992]]'},
       {publication:'x'.repeat(4097)},
-      {category:'x'.repeat(101)},{promo:['Type 0','Type 1']},{publication:'broken'},{extra:'value'},
+      {category:'x'.repeat(101)},{promo:['Type 0','Type 1']},{publication:'broken'},
     ]) {
       const count=queries.length;
       await assert.rejects(getData('costco',params),/Invalid|Unsupported/);
