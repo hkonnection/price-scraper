@@ -8,16 +8,21 @@ import { clean } from '../cleaners/lululemon.js';
 /**
  * Loads private parser boundaries without launching Playwright.
  * @param {object|null} browser - Optional isolated browser stub, never a real launch.
+ * @param {object} options - Isolated environment and launch-options recorder.
  * @returns {Promise<object>} Actual scraper functions in an isolated module.
  */
-async function parser(browser = null) {
-  const context = vm.createContext({ console, URL, setTimeout: fn => { fn(); } });
+async function parser(browser = null, { env = {}, launches = [] } = {}) {
+  const context = vm.createContext({ console, URL, process: { env },
+    fetch: () => { throw new Error('Remote I/O forbidden in replay'); }, setTimeout: fn => { fn(); } });
   const source = await fs.readFile(new URL('./lululemon.js', import.meta.url), 'utf8');
   const module = new vm.SourceTextModule(source + '\nexport { fetchPageData, transformProduct, scrapeSectionPages };', { context });
   await module.link(() => new vm.SyntheticModule(['chromium'], function () {
     this.setExport('chromium', { async launch(options) {
       if (!browser) throw new Error('Browser launch forbidden in replay');
       assert.equal(options.args, undefined, 'Do not launch inherited masking flags');
+      assert.deepEqual(Object.keys(options).sort(), ['channel', 'headless']);
+      assert.equal(options.channel, 'chrome');
+      launches.push({ ...options });
       return browser;
     } });
   }, { context }));
@@ -131,18 +136,34 @@ function paginatedPage(context, catalogs) {
  * Runs the actual scraper, cleaner and entrypoint with local browser/publisher stubs.
  * No real browser, credential, remote fetch, or database writer is available.
  * @param {Array<object>} catalogs - Synthetic embedded pages for each section.
- * @param {object} options - Dry-run flag and optional failing later-section data.
- * @returns {Promise<object>} Exit, publication, browser-close and local state evidence.
+ * @param {object} options - Mode, environment, section-distinct IDs and later failure controls.
+ * @returns {Promise<object>} Exit, publication, launch, browser-close and local state evidence.
  */
-async function entrypointReplay(catalogs, { dry = false, failMen = null } = {}) {
+async function entrypointReplay(catalogs, { dry = false, failMen = null, env = {}, distinctSections = false } = {}) {
   let replay;
   let closed = false;
   const browser = {
     async newContext() { return { async newPage() { return replay; } }; },
     async close() { closed = true; },
   };
-  const { api, context } = await parser(browser);
-  replay = paginatedPage(context, catalogs).replay;
+  const launches = [];
+  const { api, context } = await parser(browser, { env, launches });
+  const { replay: baseReplay, visited } = paginatedPage(context, catalogs);
+  replay = baseReplay;
+  if (distinctSections) {
+    replay.goto = async url => {
+      const num = Number(new URL(url).searchParams.get('page') || 1);
+      const section = new URL(url).pathname.includes('/men-') ? 'Men'
+        : new URL(url).pathname.includes('/we-made-too-much-accessories/') ? 'Accessories' : 'Women';
+      const data = structuredClone(catalogs[num - 1] ?? {});
+      const catalog = data.props?.pageProps?.dehydratedState?.queries?.[0]?.state?.data?.pages?.[0];
+      catalog?.included?.forEach(p => { p.id = `${section}-${p.id}`; });
+      catalog?.data?.relationships?.products?.data?.forEach(ref => { ref.id = `${section}-${ref.id}`; });
+      visited.push(`${section}:${num}`);
+      page(context, html(data));
+      return { ok: () => true, status: () => 200 };
+    };
+  }
   if (failMen) {
     const goto = replay.goto;
     replay.goto = async url => {
@@ -175,8 +196,184 @@ async function entrypointReplay(catalogs, { dry = false, failMen = null } = {}) 
     }, { context: runtime });
   });
   await module.evaluate();
-  return { exits, writes, errors, publication, prior, closed };
+  return { exits, writes, errors, publication, prior, closed, launches, visited };
 }
+
+/**
+ * Builds complete synthetic current pages with independently supplied per-page totals.
+ * All products and later pages are controls, not captured catalog evidence.
+ * @param {Array<number>} totals - Validated total count advertised on each page.
+ * @param {number} limit - Fixed raw page size.
+ * @returns {Array<object>} Synthetic embedded catalog pages.
+ */
+function driftingCatalogs(totals, limit = 40) {
+  return totals.map((totalCount, i) => currentData({ totalCount, limit, offset: i * limit,
+    products: currentProducts(i * limit, Math.min(limit, totalCount - i * limit)) }));
+}
+
+test('reported 606 to 607 metadata drift accepts disjoint synthetic raw40 pages', async () => {
+  const { api, context } = await parser();
+  // Only these metadata values reproduce the report; all 607 product identities
+  // and complete pages 3-16 are synthetic controls, not captured catalog evidence.
+  const catalogs = driftingCatalogs([606, ...Array(15).fill(607)]);
+  const { replay, visited } = paginatedPage(context, catalogs);
+  const deals = await api.scrapeSectionPages(replay, { name: 'Women', path: '/en-ca/c/test' });
+  assert.deepEqual(visited, Array.from({ length: 16 }, (_, i) => i + 1));
+  assert.equal(deals.length, 607);
+  assert.equal(new Set(deals.map(d => d.product_code)).size, 607);
+  assert.equal(deals[0].regular_price, 148);
+  assert.equal(deals[0].sale_price, 109);
+  assert.match(deals[0].image_url, /LW3JCTS_079841_1/);
+});
+
+test('anchored three-percent drift covers bounded growth, shrink and page-count crossings', async t => {
+  for (const [name, totals, expected] of [
+    ['inclusive growth budget', [600, ...Array(15).fill(618)], 618],
+    ['inclusive shrink budget', [600, ...Array(14).fill(582)], 582],
+    ['newly advertised final page', [600, ...Array(15).fill(601)], 601],
+    ['growth first appears on original final page', [...Array(14).fill(600), 601, 601], 601],
+    ['shrink removes old final page', [601, ...Array(14).fill(600)], 600],
+    ['shrink first appears on newly final page', [...Array(14).fill(601), 600], 600],
+  ]) {
+    await t.test(name, async () => {
+      const { api, context } = await parser();
+      const { replay, visited } = paginatedPage(context, driftingCatalogs(totals));
+      const deals = await api.scrapeSectionPages(replay, { name: 'Women', path: '/en-ca/c/test' });
+      assert.deepEqual(visited, totals.map((_, i) => i + 1));
+      assert.equal(deals.length, expected);
+      assert.equal(new Set(deals.map(d => d.product_code)).size, expected);
+    });
+  }
+});
+
+test('drift beyond the initial budget rejects growth, shrink and cumulative small shifts', async t => {
+  for (const [name, totals] of [
+    ['one over growth threshold', [600, 619]],
+    ['one over shrink threshold', [600, 581]],
+    ['small shifts accumulate beyond original anchor', [600, 606, 612, 619]],
+  ]) {
+    await t.test(name, async () => {
+      const { api, context } = await parser();
+      const { replay } = paginatedPage(context, driftingCatalogs(totals));
+      await assert.rejects(api.scrapeSectionPages(replay, { name: 'Women', path: '/en-ca/c/test' }), /Inconsistent catalog pagination/);
+    });
+  }
+});
+
+test('observed metadata drift allows bounded partial raw overlap with first identity winning', async t => {
+  for (const overlap of [1, 18]) {
+    await t.test(`overlap ${overlap} within initial budget 18`, async () => {
+      const { api, context } = await parser();
+      const catalogs = driftingCatalogs([600, ...Array(15).fill(601)]);
+      const secondProducts = currentProducts(40 - overlap, 40);
+      secondProducts[0].attributes.styles[0].colors[0].price.salePrice = 1;
+      catalogs[1] = currentData({ totalCount: 601, offset: 40, products: secondProducts });
+      const { replay } = paginatedPage(context, catalogs);
+      const deals = await api.scrapeSectionPages(replay, { name: 'Women', path: '/en-ca/c/test' });
+      assert.equal(deals.length, 601 - overlap);
+      assert.equal(new Set(deals.map(d => d.product_code)).size, deals.length);
+      assert.notEqual(deals.find(d => d.product_code === `synthetic-${40 - overlap}`).sale_price, 1);
+    });
+  }
+});
+
+test('raw overlap dedupe runs before availability filtering during count movement', async () => {
+  const { api, context } = await parser();
+  const catalogs = driftingCatalogs([600, ...Array(15).fill(601)]);
+  const first = currentProducts(0, 40);
+  first[39].attributes.styles.forEach(s => s.colors.forEach(c => { c.availability.isAvailable = false; }));
+  catalogs[0] = currentData({ totalCount: 600, products: first });
+  // Same ID becomes available on the next page; raw first occurrence still wins.
+  catalogs[1] = currentData({ totalCount: 601, offset: 40, products: currentProducts(39, 40) });
+  const deals = await api.scrapeSectionPages(paginatedPage(context, catalogs).replay,
+    { name: 'Women', path: '/en-ca/c/test' });
+  assert.equal(deals.length, 599);
+  assert.equal(deals.some(d => d.product_code === 'synthetic-39'), false);
+});
+
+test('overlap budget is cumulative and never allows repeated or no-progress pages', async t => {
+  const totals = [600, ...Array(15).fill(601)];
+  for (const [name, changes] of [
+    ['one over overlap budget', [[1, currentProducts(21, 40)]]],
+    ['cumulative overlap exceeds budget', [[1, currentProducts(30, 40)], [2, [...currentProducts(61, 9), ...currentProducts(80, 31)]]]],
+    ['whole page repeats during drift', [[1, currentProducts(0, 40)]]],
+    ['reordered page repeats during drift', [[1, currentProducts(0, 40).reverse()]]],
+    ['one-product final page makes no progress', [[15, currentProducts(0, 1)]]],
+    ['within-page duplicate despite drift', [[1, [currentProducts(40, 1)[0], ...currentProducts(40, 39)]]]],
+  ]) {
+    await t.test(name, async () => {
+      const { api, context } = await parser();
+      const catalogs = driftingCatalogs(totals);
+      changes.forEach(([index, products]) => {
+        catalogs[index] = currentData({ totalCount: 601, offset: index * 40, products });
+      });
+      const { replay } = paginatedPage(context, catalogs);
+      await assert.rejects(api.scrapeSectionPages(replay, { name: 'Women', path: '/en-ca/c/test' }), /Repeated catalog product|No pagination progress/);
+    });
+  }
+});
+
+test('drift rounding and maximum page cap retain strict boundary checks', async t => {
+  for (const [initial, later, accepts] of [[33, 34, false], [34, 35, true], [34, 33, true], [34, 36, false]]) {
+    await t.test(`initial ${initial}, later ${later}`, async () => {
+      const { api, context } = await parser();
+      const count = Math.ceil(later / 10);
+      const { replay } = paginatedPage(context, driftingCatalogs([initial, ...Array(count - 1).fill(later)], 10));
+      if (accepts) assert.equal((await api.scrapeSectionPages(replay, { name: 'Women', path: '/en-ca/c/test' })).length, later);
+      else await assert.rejects(api.scrapeSectionPages(replay, { name: 'Women', path: '/en-ca/c/test' }), /Inconsistent catalog pagination/);
+    });
+  }
+  await t.test('200 pages allowed but bounded count growth cannot advertise 201', async () => {
+    const { api, context } = await parser();
+    const { replay, visited } = paginatedPage(context, driftingCatalogs(Array(200).fill(600), 3));
+    assert.equal((await api.scrapeSectionPages(replay, { name: 'Women', path: '/en-ca/c/test' })).length, 600);
+    assert.equal(visited.length, 200);
+    const growing = paginatedPage(context, driftingCatalogs([600, 601], 3)).replay;
+    await assert.rejects(api.scrapeSectionPages(growing, { name: 'Women', path: '/en-ca/c/test' }), /Invalid catalog pagination/);
+  });
+  await t.test('shrink behind the requested offset fails rather than accepting an empty old final page', async () => {
+    const { api, context } = await parser();
+    const catalogs = driftingCatalogs(Array(16).fill(601));
+    catalogs[15] = currentData({ totalCount: 600, offset: 600, products: currentProducts(600, 1) });
+    await assert.rejects(api.scrapeSectionPages(paginatedPage(context, catalogs).replay,
+      { name: 'Women', path: '/en-ca/c/test' }), /Invalid catalog pagination/);
+  });
+});
+
+test('drift observation remains section-local even when totals return to the initial anchor', async () => {
+  const { api, context } = await parser();
+  const totals = [600, 601, ...Array(13).fill(600)];
+  const catalogs = driftingCatalogs(totals);
+  catalogs[2] = currentData({ totalCount: 600, offset: 80, products: currentProducts(79, 40) });
+  const { replay } = paginatedPage(context, catalogs);
+  assert.equal((await api.scrapeSectionPages(replay, { name: 'Women', path: '/en-ca/c/test' })).length, 599);
+  // A separate stable section cannot borrow the previous section's observed drift.
+  const stable = driftingCatalogs(Array(15).fill(600));
+  stable[1] = currentData({ totalCount: 600, offset: 40, products: currentProducts(39, 40) });
+  await assert.rejects(api.scrapeSectionPages(paginatedPage(context, stable).replay,
+    { name: 'Men', path: '/en-ca/c/test' }), /Repeated catalog product/);
+});
+
+test('visible Chrome requires explicit environment opt-in with isolated launch stubs', async t => {
+  for (const [value, headless] of [[undefined, true], ['1', false], ['0', true], ['false', true],
+    ['', true], ['true', true], ['TRUE', true], [' 1 ', true], ['yes', true]]) {
+    await t.test(`LULULEMON_VISIBLE_CHROME=${JSON.stringify(value)}`, async () => {
+      let replay;
+      let closed = false;
+      const launches = [];
+      const browser = { async newContext(options) {
+        assert.equal(options, undefined);
+        return { async newPage() { return replay; } };
+      }, async close() { closed = true; } };
+      const env = value === undefined ? {} : { LULULEMON_VISIBLE_CHROME: value };
+      const { api, context } = await parser(browser, { env, launches });
+      replay = page(context, html(currentData()));
+      assert.equal((await api.scrapeLululemon()).deals.length, 9);
+      assert.deepEqual(launches, [{ headless, channel: 'chrome' }]);
+      assert.equal(closed, true);
+    });
+  }
+});
 
 test('projected CAD products parse with explicitly synthetic complete-page metadata', async () => {
   const { api, context } = await parser();
@@ -359,10 +556,10 @@ test('current metadata must contain positive safe integers and the requested off
   await assert.rejects(api.fetchPageData(page(context, html(currentData({ totalCount: 201, limit: 1 }))), '/en-ca/c/test', 1), /Invalid catalog pagination/);
 });
 
-test('subsequent current pages cannot change total count, limit, or catalog schema', async t => {
+test('subsequent current pages cannot exceed drift budget or change limit or catalog schema', async t => {
   const first = currentData({ totalCount: 5, limit: 3, products: currentProducts(0, 3) });
   for (const [name, second] of [
-    ['totalCount changes but page count stays two', currentData({ totalCount: 6, limit: 3, offset: 3, products: currentProducts(3, 3) })],
+    ['count changes beyond zero budget for tiny catalog', currentData({ totalCount: 6, limit: 3, offset: 3, products: currentProducts(3, 3) })],
     ['limit changes but page count stays two', currentData({ totalCount: 5, limit: 4, offset: 4, products: currentProducts(4, 1) })],
     ['catalog switches to legacy', legacyData([legacyProduct('new')], 2)],
   ]) {
@@ -477,6 +674,137 @@ test('complete raw current sections may legitimately have zero sale deals', asyn
   products.forEach(p => p.attributes.styles.forEach(s => s.colors.forEach(c => { c.availability.isAvailable = false; })));
   const deals = await api.scrapeSectionPages(page(context, html(currentData({ products }))), { name: 'Women', path: '/en-ca/c/test' });
   assert.equal(deals.length, 0);
+});
+
+test('CAD selection keeps price and image paired to the same available color', async () => {
+  const { api } = await parser();
+  const product = currentProducts(0, 1)[0];
+  const colors = product.attributes.styles[0].colors;
+  colors[0].price.currencyCode = 'USD';
+  const cad = structuredClone(colors[0]);
+  cad.price = { currencyCode: 'CAD', listPrice: 100, salePrice: 75 };
+  cad.images = [{ url: 'https://example.invalid/synthetic-cad-color.jpg' }];
+  colors.push(cad);
+  const deal = api.transformProduct(product, 'Women');
+  assert.equal(deal.regular_price, 100);
+  assert.equal(deal.sale_price, 75);
+  assert.equal(deal.image_url, 'https://example.invalid/synthetic-cad-color.jpg');
+});
+
+test('inventory-drift offline smoke runs happy, negative, then publication state checks', async t => {
+  const successes = [], rejected = [];
+  const exact = driftingCatalogs([606, ...Array(15).fill(607)]);
+  const overlap = driftingCatalogs([600, ...Array(15).fill(601)]);
+  overlap[1] = currentData({ totalCount: 601, offset: 40, products: currentProducts(39, 40) });
+  await t.test('phase 1 happy: exact metadata, growth, shrink and overlap through actual entrypoint', async () => {
+    for (const [name, catalogs, count, visible] of [
+      ['reported606/607 synthetic controls', exact, 607, true],
+      ['growth inclusive18', driftingCatalogs([600, ...Array(15).fill(618)]), 618, false],
+      ['shrink inclusive18', driftingCatalogs([600, ...Array(14).fill(582)]), 582, false],
+      ['new final page', driftingCatalogs([600, ...Array(15).fill(601)]), 601, false],
+      ['removed final page', driftingCatalogs([601, ...Array(14).fill(600)]), 600, false],
+      ['partial overlap deduped', overlap, 600, true],
+    ]) {
+      const result = await entrypointReplay(catalogs, { distinctSections: true,
+        env: visible ? { LULULEMON_VISIBLE_CHROME: '1' } : {} });
+      assert.deepEqual(result.exits, []);
+      assert.equal(result.closed, true);
+      assert.equal(result.writes.length, 1);
+      assert.equal(result.publication.length, count * 3);
+      assert.equal(new Set(result.publication.map(d => d.product_code)).size, count * 3);
+      assert.deepEqual(result.launches, [{ headless: !visible, channel: 'chrome' }]);
+      assert.ok(result.publication.every(d => d.regular_price > d.sale_price && d.sale_price > 0
+        && d.brand === 'Lululemon' && d.promo_type === 'We Made Too Much'));
+      const first = result.publication[0];
+      assert.equal(first.regular_price, 148);
+      assert.equal(first.sale_price, 109);
+      assert.match(first.image_url, /LW3JCTS_079841_1/);
+      successes.push(result);
+      console.log(`DRIFT_SMOKE_HAPPY ${name}: uniqueCADRows=${count * 3} publishCalls=1 headless=${!visible} remoteWrites=0`);
+    }
+  });
+  await t.test('phase 2 negative: moving inventory cannot hide bad pagination or repetition', async () => {
+    const wrongOffset = driftingCatalogs([600, 601]);
+    wrongOffset[1] = currentData({ totalCount: 601, offset: 0, products: currentProducts(40, 40) });
+    const changedLimit = driftingCatalogs([600, 601]);
+    changedLimit[1] = currentData({ totalCount: 601, limit: 41, offset: 41, products: currentProducts(40, 41) });
+    const shortIntermediate = driftingCatalogs([600, 601]);
+    shortIntermediate[1] = currentData({ totalCount: 601, offset: 40, products: currentProducts(40, 39) });
+    const repeated = driftingCatalogs([600, 601]);
+    repeated[1] = currentData({ totalCount: 601, offset: 40, products: currentProducts(0, 40) });
+    const tooMuchOverlap = driftingCatalogs([600, 601]);
+    tooMuchOverlap[1] = currentData({ totalCount: 601, offset: 40, products: currentProducts(21, 40) });
+    const noProgressFinal = driftingCatalogs([600, ...Array(15).fill(601)]);
+    noProgressFinal[15] = currentData({ totalCount: 601, offset: 600, products: currentProducts(0, 1) });
+    const shortFinal = driftingCatalogs([606, ...Array(15).fill(607)]);
+    shortFinal[15] = currentData({ totalCount: 607, offset: 600, products: currentProducts(600, 6) });
+    const withinPageDuplicate = driftingCatalogs([600, 601]);
+    withinPageDuplicate[1] = currentData({ totalCount: 601, offset: 40,
+      products: [currentProducts(40, 1)[0], ...currentProducts(40, 39)] });
+    const unavailable = structuredClone(exact);
+    unavailable.forEach(data => data.props.pageProps.dehydratedState.queries[0].state.data.pages[0].included.forEach(p =>
+      p.attributes.styles.forEach(s => s.colors.forEach(c => { c.availability.isAvailable = false; }))));
+    const negatives = [
+      ['growth one over budget', driftingCatalogs([600, 619]), /Inconsistent catalog pagination/],
+      ['shrink one over budget', driftingCatalogs([600, 581]), /Inconsistent catalog pagination/],
+      ['cumulative total drift', driftingCatalogs([600, 606, 612, 619]), /Inconsistent catalog pagination/],
+      ['wrong offset during drift', wrongOffset, /Invalid catalog pagination/],
+      ['changed limit during drift', changedLimit, /Inconsistent catalog pagination/],
+      ['changed type during drift', [exact[0], legacyData([legacyProduct('legacy')], 16)], /Inconsistent catalog pagination/],
+      ['short non-final during drift', shortIntermediate, /Incomplete catalog products/],
+      ['short advertised new final page', shortFinal, /Incomplete catalog products/],
+      ['whole repeated page during drift', repeated, /No pagination progress/],
+      ['partial overlap one over budget', tooMuchOverlap, /Repeated catalog product/],
+      ['one-product final no progress', noProgressFinal, /No pagination progress/],
+      ['duplicate within drifting page', withinPageDuplicate, /Repeated catalog product/],
+      ['200-page cap despite small drift', driftingCatalogs([600, 601], 3), /Invalid catalog pagination/],
+      ['whole drift run zero output', unavailable, /No usable Lululemon deals/],
+    ];
+    for (const [name, catalogs, message] of negatives) {
+      for (const dry of [false, true]) {
+        const result = await entrypointReplay(catalogs, { dry, distinctSections: true });
+        assert.deepEqual(result.exits, [1], name);
+        assert.equal(result.closed, true, name);
+        assert.equal(result.writes.length, 0, name);
+        assert.match(result.errors[0], message, name);
+        rejected.push(result);
+      }
+      console.log(`DRIFT_SMOKE_NEGATIVE ${name}: rejected both modes publishCalls=0 remoteWrites=0`);
+    }
+    // Harder after the first clean pass: fail a later section after all 16
+    // Women pages passed, and test overlap accumulation across multiple pages.
+    const later = await entrypointReplay(exact, { distinctSections: true,
+      failMen: currentData({ totalCount: 3, products: currentProducts(0, 2) }) });
+    assert.deepEqual(later.exits, [1]);
+    assert.match(later.errors[0], /men-we-made-too-much.*Incomplete catalog products/);
+    assert.equal(later.writes.length, 0);
+    rejected.push(later);
+    const cumulative = driftingCatalogs([600, 601, 601]);
+    cumulative[1] = currentData({ totalCount: 601, offset: 40, products: currentProducts(30, 40) });
+    cumulative[2] = currentData({ totalCount: 601, offset: 80,
+      products: [...currentProducts(61, 9), ...currentProducts(80, 31)] });
+    const accumulated = await entrypointReplay(cumulative);
+    assert.deepEqual(accumulated.exits, [1]);
+    assert.match(accumulated.errors[0], /Repeated catalog product/);
+    assert.equal(accumulated.writes.length, 0);
+    rejected.push(accumulated);
+    console.log('DRIFT_SMOKE_NEGATIVE harder: later section after complete drift traversal and cumulative overlap19 rejected publishCalls=0 remoteWrites=0');
+  });
+  await t.test('phase 3 state: prior publication preserved on failure, successful IDs and launch verified', () => {
+    assert.equal(successes.length, 6);
+    assert.equal(rejected.length, 30);
+    rejected.forEach(result => {
+      assert.deepEqual(result.publication, result.prior);
+      assert.equal(result.writes.length, 0);
+    });
+    successes.forEach(result => {
+      assert.deepEqual(result.publication, structuredClone(result.writes[0]));
+      assert.notDeepEqual(result.publication, result.prior);
+      assert.equal(new Set(result.publication.map(d => d.product_code)).size, result.publication.length);
+      assert.equal(result.launches.length, 1);
+    });
+    console.log('DRIFT_SMOKE_STATE successfulUniqueReplacements=6 rejectedPriorSnapshotsUnchanged=30 launchOptionsVerified=6 persistenceCallsOnFailure=0 remoteWrites=0');
+  });
 });
 
 test('offline entrypoint smoke completes happy, negative, then state verification phases', async t => {
