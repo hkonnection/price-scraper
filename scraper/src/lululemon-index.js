@@ -10,6 +10,11 @@ import { getCleaner } from './cleaners/index.js';
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
+/**
+ * Scrapes, cleans and publishes Canada deals, or prints a write-free dry run.
+ * Empty cleaned output fails without touching the previous publication.
+ * @returns {Promise<void>} Resolves after successful output; exits nonzero on failure.
+ */
 async function main() {
   console.log('Starting Lululemon Canada WMTM scraper...');
   console.log(`Mode: ${DRY_RUN ? 'DRY RUN (no database writes)' : 'LIVE'}`);
@@ -32,8 +37,7 @@ async function main() {
     const deals = cleaner.clean(rawDeals);
 
     if (deals.length === 0) {
-      console.log('No deals found. Exiting.');
-      return;
+      throw new Error('No usable Lululemon deals found; existing publication was not changed.');
     }
 
     // Show sample deals

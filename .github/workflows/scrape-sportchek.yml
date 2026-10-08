@@ -15,6 +15,11 @@ on:
   repository_dispatch:
     types: [scrape-sportchek]
 
+# Serialize same-retailer publication; never cancel an in-flight write.
+concurrency:
+  group: scrape-sportchek
+  cancel-in-progress: false
+
 jobs:
   scrape:
     runs-on: ubuntu-latest

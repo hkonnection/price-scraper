@@ -1,7 +1,7 @@
 /**
  * lululemon Canada Scraper
  * Scrapes "We Made Too Much" (WMTM) deals from shop.lululemon.com/en-ca.
- * Uses Playwright to bypass Akamai bot protection, then fetches paginated
+ * Uses ordinary Playwright navigation to read paginated public Canada
  * product data from __NEXT_DATA__ JSON embedded in each page.
  *
  * Covers three WMTM sections: Women, Men, and Accessories.
@@ -28,33 +28,20 @@ const WMTM_SECTIONS = [
 
 /**
  * Scrapes all WMTM deals from lululemon Canada.
- * Launches Playwright to establish an Akamai session, then uses
- * in-browser fetch() to paginate through all WMTM sections.
+ * Launches Chrome with normal browser defaults and navigates each WMTM page.
+ * Does not mask fingerprints or solve retailer challenges.
  *
  * @returns {Promise<{deals: Array<object>, totalProducts: number, sections: Array<object>}>}
+ * @throws {Error} When ordinary access or any section's catalog cannot be read.
  */
 export async function scrapeLululemon() {
   console.log('Launching browser...');
   const browser = await chromium.launch({
     headless: true,
     channel: 'chrome',
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--no-sandbox',
-    ],
   });
-  const context = await browser.newContext({
-    userAgent:
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
-    viewport: { width: 1440, height: 900 },
-    locale: 'en-CA',
-  });
+  const context = await browser.newContext();
   const page = await context.newPage();
-
-  // Mask webdriver property to avoid bot detection
-  await page.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-  });
 
   const allDeals = [];
   const sectionSummaries = [];
@@ -106,24 +93,20 @@ export async function scrapeLululemon() {
 }
 
 /**
- * Scrapes all pages for a single WMTM section using in-browser fetch.
- * Fetches page 1 HTML, extracts __NEXT_DATA__ to get totalProductPages,
- * then fetches remaining pages.
+ * Scrapes all pages for a single WMTM section using ordinary navigation.
+ * Reads page 1 embedded catalog metadata, then visits each remaining page.
+ * Rejects incomplete pagination instead of publishing a partial section.
  *
  * @param {import('playwright').Page} page - Playwright page with active session
  * @param {{name: string, path: string}} section - WMTM section config
  * @returns {Promise<Array<object>>} Array of deal objects
+ * @throws {Error} When a required page or its catalog pagination is unusable.
  */
 async function scrapeSectionPages(page, section) {
   const sectionDeals = [];
 
   // Fetch page 1 to get total page count
   const firstPageData = await fetchPageData(page, section.path, 1);
-
-  if (!firstPageData) {
-    console.log(`  Could not fetch ${section.name} page 1, skipping section.`);
-    return [];
-  }
 
   const { products, totalProductPages } = firstPageData;
   console.log(`  ${section.name}: ${totalProductPages} pages to scrape`);
@@ -136,11 +119,6 @@ async function scrapeSectionPages(page, section) {
   // Fetch remaining pages
   for (let pageNum = 2; pageNum <= totalProductPages; pageNum++) {
     const pageData = await fetchPageData(page, section.path, pageNum);
-
-    if (!pageData || !pageData.products) {
-      console.log(`  Page ${pageNum}: fetch failed, skipping`);
-      continue;
-    }
 
     const pageDeals = pageData.products
       .map((p) => transformProduct(p, section.name))
@@ -156,51 +134,64 @@ async function scrapeSectionPages(page, section) {
 }
 
 /**
- * Fetches a single page of WMTM products via in-browser fetch.
- * Extracts __NEXT_DATA__ JSON from the HTML response.
+ * Navigates to a single WMTM page and reads its embedded public NEXT_DATA.
+ * Validates legacy/current catalog schemas and page offsets.
  *
  * @param {import('playwright').Page} page - Playwright page with active session
  * @param {string} sectionPath - URL path for the WMTM section
  * @param {number} pageNum - Page number to fetch
- * @returns {Promise<{products: Array<object>, totalProductPages: number}|null>}
+ * @returns {Promise<{products: Array<object>, totalProductPages: number}>}
+ * @throws {Error} When HTTP, embedded data or catalog pagination is unusable.
  */
 async function fetchPageData(page, sectionPath, pageNum) {
   try {
+    const url = `${BASE_URL}${sectionPath}${pageNum === 1 ? '' : `?page=${pageNum}`}`;
+    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    if (!response?.ok()) throw new Error(`HTTP ${response?.status() ?? 'unknown'}`);
+    await page.waitForSelector('#__NEXT_DATA__', { state: 'attached', timeout: 30000 });
     const result = await page.evaluate(
-      async ({ path, num }) => {
-        const url = num === 1 ? path : `${path}?page=${num}`;
-        const resp = await fetch(url, { headers: { Accept: 'text/html' } });
-        if (!resp.ok) return null;
-
-        const html = await resp.text();
-        const match = html.match(
-          /<script id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/
-        );
-        if (!match) return null;
-
-        const data = JSON.parse(match[1]);
+      ({ num }) => {
+        const embedded = document.getElementById('__NEXT_DATA__');
+        if (!embedded?.textContent) throw new Error('Missing NEXT_DATA');
+        const data = JSON.parse(embedded.textContent);
         const queries =
           data.props?.pageProps?.dehydratedState?.queries || [];
-        const catQuery = queries.find(
-          (q) => q.queryKey?.[0] === 'CategoryPageDataQuery'
-        );
-        if (!catQuery) return null;
+        const currentQuery = queries.find(q => q.queryKey?.[0] === 'catalogPageData');
+        if (currentQuery) {
+          const catalog = currentQuery.state?.data?.pages?.[0];
+          const attributes = catalog?.data?.attributes;
+          const references = catalog?.data?.relationships?.products?.data;
+          if (!Array.isArray(catalog?.included) || !Array.isArray(references) || references.length === 0) {
+            throw new Error('Empty or malformed catalog products');
+          }
+          const { totalCount, limit, offset } = attributes || {};
+          if (!Number.isInteger(totalCount) || totalCount <= 0 || !Number.isInteger(limit) || limit <= 0 ||
+              !Number.isInteger(offset) || offset !== (num - 1) * limit || Math.ceil(totalCount / limit) > 200) {
+            throw new Error('Invalid catalog pagination');
+          }
+          const byId = new Map(catalog.included.filter(p => p.type === 'products').map(p => [p.id, p]));
+          const products = references.map(ref => byId.get(ref.id));
+          if (products.some(p => !p?.attributes)) throw new Error('Missing referenced catalog product');
+          return { products, totalProductPages: Math.ceil(totalCount / limit) };
+        }
 
-        const pageData = catQuery.state?.data?.pages?.[0];
-        if (!pageData) return null;
-
-        return {
-          products: pageData.products || [],
-          totalProductPages: pageData.totalProductPages || 1,
-        };
+        const legacyQuery = queries.find(q => q.queryKey?.[0] === 'CategoryPageDataQuery');
+        const legacy = legacyQuery?.state?.data?.pages?.[0];
+        if (!Array.isArray(legacy?.products) || legacy.products.length === 0) {
+          throw new Error('Unsupported or empty category catalog');
+        }
+        const totalProductPages = legacy.totalProductPages;
+        if (!Number.isInteger(totalProductPages) || totalProductPages < 1 || totalProductPages > 200) {
+          throw new Error('Invalid category pagination');
+        }
+        return { products: legacy.products, totalProductPages };
       },
-      { path: sectionPath, num: pageNum }
+      { num: pageNum }
     );
 
     return result;
   } catch (err) {
-    console.error(`  Error fetching page ${pageNum}: ${err.message}`);
-    return null;
+    throw new Error(`Lululemon ${sectionPath} page ${pageNum}: ${err.message}`);
   }
 }
 
@@ -213,12 +204,36 @@ async function fetchPageData(page, sectionPath, pageNum) {
  * @returns {object|null} Deal object or null if invalid
  */
 function transformProduct(product, sectionName) {
-  if (!product.productOnSale) return null;
+  // The current catalog keeps matched prices and images on each style/color.
+  if (product?.type === 'products') {
+    const attributes = product.attributes;
+    if (!attributes?.name || !attributes.url || !Array.isArray(attributes.styles)) return null;
+    const colors = attributes.styles.flatMap(style => Array.isArray(style.colors) ? style.colors : []);
+    const color = colors.find(color => {
+      const price = color?.price;
+      return color?.availability?.isAvailable === true && price?.currencyCode === 'CAD' &&
+        Number.isFinite(price.listPrice) && Number.isFinite(price.salePrice) &&
+        price.listPrice > 0 && price.salePrice > 0 && price.salePrice < price.listPrice;
+    });
+    if (!color) return null;
+    const colorId = color.id?.split('-').at(-1);
+    product = {
+      productOnSale: true,
+      productId: product.id,
+      displayName: attributes.name,
+      listPrice: [color.price.listPrice],
+      productSalePrice: [color.price.salePrice],
+      pdpUrl: attributes.url + (colorId ? `?color=${Number(colorId)}` : ''),
+      swatches: [{ primaryImage: color.images?.[0]?.url || null }],
+      parentCategoryUnifiedId: attributes.parentCategory?.unifiedId || '',
+    };
+  }
+  if (!product?.productOnSale || typeof product.displayName !== 'string' || !product.displayName.trim()) return null;
 
   const regularPrice = parseFloat(product.listPrice?.[0]);
   const salePrice = parseFloat(product.productSalePrice?.[0]);
 
-  if (!regularPrice || !salePrice || isNaN(regularPrice) || isNaN(salePrice)) {
+  if (!Number.isFinite(regularPrice) || !Number.isFinite(salePrice) || regularPrice <= 0 || salePrice <= 0) {
     return null;
   }
 
