@@ -36,6 +36,7 @@ const MOCK_DEALS: Deal[] = [
 /**
  * Fetches active retailers and current deals from D1.
  * When a specific retailer is selected, fetches only that retailer's deals (no LIMIT).
+ * Reads only the newest completed publication per retailer, plus legacy unversioned rows.
  * For "all" view, applies LIMIT 2000 to stay within Worker resource limits.
  * Falls back to mock data for local development.
  *
@@ -68,22 +69,38 @@ async function getData(retailerSlug: string): Promise<{
       .all<Retailer>();
     const retailers = retailersResult.results || [];
 
-    // Get latest scrape dates for each retailer (simple GROUP BY)
-    const datesResult = await db
-      .prepare(`
-        SELECT r.slug, MAX(sh.completed_at) as completed_at
-        FROM scrape_history sh
-        JOIN scrape_sources ss ON sh.source_id = ss.id
-        JOIN retailers r ON ss.retailer_id = r.id
-        WHERE sh.status = 'completed'
-        GROUP BY r.slug
-      `)
-      .all<{ slug: string; completed_at: string }>();
+    // Small source configuration read; avoid a history-table join that SQLite
+    // can reorder into a full history scan for every retailer.
+    const sourcesResult = await db.prepare(`
+      SELECT ss.id, ss.retailer_id
+      FROM scrape_sources ss
+      JOIN retailers r ON ss.retailer_id = r.id
+      WHERE r.is_active = 1
+    `).all<{ id: number; retailer_id: number }>();
+    const sources = sourcesResult.results || [];
 
+    // One bounded result per active retailer, constrained by indexed source ids.
+    // Keep displayed rows and timestamp tied to the same completed publication.
     const retailerDates: Record<string, string> = {};
-    for (const row of datesResult.results || []) {
-      retailerDates[row.slug] = row.completed_at;
+    const latestSnapshots: Array<{ retailerId: number; scrapeId: number }> = [];
+    for (const retailer of retailers) {
+      const sourceIds = sources.filter(source => source.retailer_id === retailer.id).map(source => source.id);
+      if (sourceIds.length === 0) continue;
+      const latest = await db.prepare(`
+        SELECT sh.id as scrape_id, sh.completed_at
+        FROM scrape_history sh
+        WHERE sh.status = 'completed' AND sh.source_id IN (${sourceIds.map(() => '?').join(',')})
+        ORDER BY sh.completed_at DESC, sh.id DESC
+        LIMIT 1
+      `).bind(...sourceIds).first<{ scrape_id: number; completed_at: string }>();
+      if (!latest) continue;
+      retailerDates[retailer.slug] = latest.completed_at;
+      latestSnapshots.push({ retailerId: retailer.id, scrapeId: latest.scrape_id });
     }
+    // Pair retailer and history ids: a mislinked row must not qualify through
+    // another retailer's completed snapshot. Before a first scrape, keep legacy rows.
+    const snapshotFilter = `AND (d.scrape_id IS NULL OR ${latestSnapshots.map(() => '(d.retailer_id = ? AND d.scrape_id = ?)').join(' OR ') || '0'})`;
+    const snapshotParams = latestSnapshots.flatMap(snapshot => [snapshot.retailerId, snapshot.scrapeId]);
 
     // Get Costco flyer dates separately (simple single-row query)
     const flyerResult = await db
@@ -119,9 +136,10 @@ async function getData(retailerSlug: string): Promise<{
             AND d.regular_price > 0
             AND d.savings_percent > 0
             AND COALESCE(d.in_stock, 1) = 1
+          ${snapshotFilter}
           ORDER BY d.savings_percent DESC
           LIMIT 2000
-        `).bind(today, today)
+        `).bind(today, today, ...snapshotParams)
       : db.prepare(`
           SELECT d.id, d.product_code, d.product_name, d.brand, d.regular_price, d.sale_price,
                  d.savings_amount, d.savings_percent, d.category, d.promo_type, d.image_url,
@@ -136,8 +154,9 @@ async function getData(retailerSlug: string): Promise<{
             AND d.regular_price > 0
             AND d.savings_percent > 0
             AND COALESCE(d.in_stock, 1) = 1
+          ${snapshotFilter}
           ORDER BY d.savings_percent DESC
-        `).bind(retailerSlug, today, today);
+        `).bind(retailerSlug, today, today, ...snapshotParams);
 
     const dealsResult = await dealsQuery.all<DealRow>();
 

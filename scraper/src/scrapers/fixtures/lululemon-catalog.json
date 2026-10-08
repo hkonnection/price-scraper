@@ -1,0 +1,334 @@
+{
+  "props": {
+    "pageProps": {
+      "dehydratedState": {
+        "queries": [
+          {
+            "queryKey": [
+              "catalogPageData"
+            ],
+            "state": {
+              "data": {
+                "pages": [
+                  {
+                    "data": {
+                      "id": "/c/women-we-made-too-much/n16o10z8mhd",
+                      "type": "category-details",
+                      "attributes": {
+                        "title": "Women's We Made Too Much",
+                        "type": "sale",
+                        "totalCount": 504,
+                        "offset": 0,
+                        "limit": 40
+                      },
+                      "relationships": {
+                        "products": {
+                          "data": [
+                            {
+                              "id": "brr0e930oy",
+                              "type": "products"
+                            },
+                            {
+                              "id": "vggwe5mu1w",
+                              "type": "products"
+                            },
+                            {
+                              "id": "knxolsef34",
+                              "type": "products"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    "included": [
+                      {
+                        "id": "brr0e930oy",
+                        "type": "products",
+                        "attributes": {
+                          "name": "Scuba Cropped Funnel-Neck Half Zip *Waffle",
+                          "url": "/p/scuba-cropped-funnel-neck-half-zip-waffle/brr0e930oy",
+                          "parentCategory": {
+                            "id": "n16o10z8mhd",
+                            "name": "Women's We Made Too Much",
+                            "unifiedId": "womens-outerwear",
+                            "displayName": "Women's We Made Too Much"
+                          },
+                          "styles": [
+                            {
+                              "id": "LW3JCTS",
+                              "colors": [
+                                {
+                                  "id": "LW3JCTS-079841",
+                                  "price": {
+                                    "listPrice": 148,
+                                    "salePrice": 109,
+                                    "currencyCode": "CAD"
+                                  },
+                                  "images": [
+                                    {
+                                      "url": "https://images.lululemon.com/is/image/lululemon/LW3JCTS_079841_1"
+                                    }
+                                  ],
+                                  "availability": {
+                                    "isAvailable": true,
+                                    "fulfillmentType": "ship"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "vggwe5mu1w",
+                        "type": "products",
+                        "attributes": {
+                          "name": "lululemon Align™ High-Rise Pant 28\"",
+                          "url": "/p/align-pant-full-length-28/vggwe5mu1w",
+                          "parentCategory": {
+                            "id": "n16o10z8mhd",
+                            "name": "Women's We Made Too Much",
+                            "unifiedId": "womens-leggings",
+                            "displayName": "Women's We Made Too Much"
+                          },
+                          "styles": [
+                            {
+                              "id": "LW5ECIS",
+                              "colors": [
+                                {
+                                  "id": "LW5ECIS-076998",
+                                  "price": {
+                                    "listPrice": 108,
+                                    "salePrice": 69,
+                                    "currencyCode": "CAD"
+                                  },
+                                  "images": [
+                                    {
+                                      "url": "https://images.lululemon.com/is/image/lululemon/LW5ECIS_076998_1"
+                                    }
+                                  ],
+                                  "availability": {
+                                    "isAvailable": true,
+                                    "fulfillmentType": "ship"
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "id": "LW5CZ4S",
+                              "colors": [
+                                {
+                                  "id": "LW5CZ4S-075700",
+                                  "price": {
+                                    "listPrice": 108,
+                                    "salePrice": 79,
+                                    "currencyCode": "CAD"
+                                  },
+                                  "images": [
+                                    {
+                                      "url": "https://images.lululemon.com/is/image/lululemon/LW5CZ4S_075700_1"
+                                    }
+                                  ],
+                                  "availability": {
+                                    "isAvailable": true,
+                                    "fulfillmentType": "ship"
+                                  }
+                                },
+                                {
+                                  "id": "LW5CZ4S-074050",
+                                  "price": {
+                                    "listPrice": 108,
+                                    "salePrice": 59,
+                                    "currencyCode": "CAD"
+                                  },
+                                  "images": [
+                                    {
+                                      "url": "https://images.lululemon.com/is/image/lululemon/LW5CZ4S_074050_1"
+                                    }
+                                  ],
+                                  "availability": {
+                                    "isAvailable": true,
+                                    "fulfillmentType": "ship"
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "id": "LW5DVHS",
+                              "colors": [
+                                {
+                                  "id": "LW5DVHS-071189",
+                                  "price": {
+                                    "listPrice": 128,
+                                    "salePrice": 39,
+                                    "currencyCode": "CAD"
+                                  },
+                                  "images": [
+                                    {
+                                      "url": "https://images.lululemon.com/is/image/lululemon/LW5DVHS_071189_1"
+                                    }
+                                  ],
+                                  "availability": {
+                                    "isAvailable": true,
+                                    "fulfillmentType": "ship"
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "id": "LW5DITS",
+                              "colors": [
+                                {
+                                  "id": "LW5DITS-063787",
+                                  "price": {
+                                    "listPrice": 108,
+                                    "salePrice": 59,
+                                    "currencyCode": "CAD"
+                                  },
+                                  "images": [
+                                    {
+                                      "url": "https://images.lululemon.com/is/image/lululemon/LW5DITS_063787_1"
+                                    }
+                                  ],
+                                  "availability": {
+                                    "isAvailable": true,
+                                    "fulfillmentType": "ship"
+                                  }
+                                },
+                                {
+                                  "id": "LW5DITS-1179",
+                                  "price": {
+                                    "listPrice": 108,
+                                    "salePrice": 59,
+                                    "currencyCode": "CAD"
+                                  },
+                                  "images": [
+                                    {
+                                      "url": "https://images.lululemon.com/is/image/lululemon/LW5DITS_1179_1"
+                                    }
+                                  ],
+                                  "availability": {
+                                    "isAvailable": true,
+                                    "fulfillmentType": "ship"
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "id": "LW5DM9S",
+                              "colors": [
+                                {
+                                  "id": "LW5DM9S-074115",
+                                  "price": {
+                                    "listPrice": 108,
+                                    "salePrice": 79,
+                                    "currencyCode": "CAD"
+                                  },
+                                  "images": [
+                                    {
+                                      "url": "https://images.lululemon.com/is/image/lululemon/LW5DM9S_074115_1"
+                                    }
+                                  ],
+                                  "availability": {
+                                    "isAvailable": true,
+                                    "fulfillmentType": "ship"
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "id": "LW5CTES",
+                              "colors": [
+                                {
+                                  "id": "LW5CTES-072763",
+                                  "price": {
+                                    "listPrice": 108,
+                                    "salePrice": 59,
+                                    "currencyCode": "CAD"
+                                  },
+                                  "images": [
+                                    {
+                                      "url": "https://images.lululemon.com/is/image/lululemon/LW5CTES_072763_1"
+                                    }
+                                  ],
+                                  "availability": {
+                                    "isAvailable": true,
+                                    "fulfillmentType": "ship"
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "id": "LW5CTHS",
+                              "colors": [
+                                {
+                                  "id": "LW5CTHS-033068",
+                                  "price": {
+                                    "listPrice": 108,
+                                    "salePrice": 59,
+                                    "currencyCode": "CAD"
+                                  },
+                                  "images": [
+                                    {
+                                      "url": "https://images.lululemon.com/is/image/lululemon/LW5CTHS_033068_1"
+                                    }
+                                  ],
+                                  "availability": {
+                                    "isAvailable": true,
+                                    "fulfillmentType": "ship"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "knxolsef34",
+                        "type": "products",
+                        "attributes": {
+                          "name": "Scuba Mid-Rise Wide-Leg Pant *Waffle",
+                          "url": "/p/scuba-mid-rise-wide-leg-pant-waffle/knxolsef34",
+                          "parentCategory": {
+                            "id": "n16o10z8mhd",
+                            "name": "Women's We Made Too Much",
+                            "unifiedId": "womens-sweatpants",
+                            "displayName": "Women's We Made Too Much"
+                          },
+                          "styles": [
+                            {
+                              "id": "LW5HFQS",
+                              "colors": [
+                                {
+                                  "id": "LW5HFQS-079841",
+                                  "price": {
+                                    "listPrice": 148,
+                                    "salePrice": 99,
+                                    "currencyCode": "CAD"
+                                  },
+                                  "images": [
+                                    {
+                                      "url": "https://images.lululemon.com/is/image/lululemon/LW5HFQS_079841_1"
+                                    }
+                                  ],
+                                  "availability": {
+                                    "isAvailable": true,
+                                    "fulfillmentType": "ship"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

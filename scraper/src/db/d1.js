@@ -70,12 +70,20 @@ async function updateScrapeHistory(scrapeId, status, dealsCount = 0, errorMessag
 }
 
 /**
- * Pushes deals to Cloudflare D1.
+ * Pushes a replacement snapshot to Cloudflare D1.
+ * Inserts and completes the new snapshot before removing older rows, so failed
+ * insertion/history updates retain the previous completed publication.
+ * Callers must serialize runs for the same retailer.
  * @param {Array<Deal>} deals - Array of deal objects
  * @param {string} retailerSlug - Retailer slug (e.g., 'costco')
  * @param {string|null} flyerDates - Flyer date range (e.g., "January 19-25, 2026")
+ * @returns {Promise<void>} Resolves after publication and cleanup.
+ * @throws {Error} For empty snapshots or persistence/cleanup failures.
  */
 export async function pushToD1(deals, retailerSlug = 'costco', flyerDates = null) {
+  if (!Array.isArray(deals) || deals.length === 0) {
+    throw new Error('Cannot publish an empty deal snapshot; existing publication was not changed.');
+  }
   // Get retailer ID
   const retailerId = await getRetailerId(retailerSlug);
   console.log(`Retailer ID for ${retailerSlug}: ${retailerId}`);
@@ -85,11 +93,9 @@ export async function pushToD1(deals, retailerSlug = 'costco', flyerDates = null
   const scrapeId = await createScrapeHistory(sourceId || 1, flyerDates);
   console.log(`Created scrape history record: ${scrapeId}`);
 
+  let published = false;
   try {
-    // Clear existing deals for this retailer
-    const deleteSQL = `DELETE FROM deals WHERE retailer_id = ${retailerId};`;
-    await queryD1(deleteSQL);
-
+    // Stage new rows while the previous completed snapshot stays readable.
     // Insert new deals with scrape_id and validity dates
     const insertStatements = deals.map(deal => `
       INSERT INTO deals (retailer_id, scrape_id, product_code, product_name, brand, regular_price, sale_price, savings_amount, savings_percent, category, promo_type, image_url, product_url, valid_from, valid_to, scraped_at, in_stock)
@@ -118,10 +124,14 @@ export async function pushToD1(deals, retailerSlug = 'costco', flyerDates = null
 
     // Mark scrape as completed
     await updateScrapeHistory(scrapeId, 'completed', deals.length);
+    published = true;
+    // Cleanup is last: readers can select the completed snapshot even if this fails.
+    // Never delete rows belonging to a later-created publication.
+    await queryD1(`DELETE FROM deals WHERE retailer_id = ${retailerId} AND (scrape_id IS NULL OR scrape_id < ${scrapeId});`);
     console.log(`Successfully pushed ${deals.length} deals for ${retailerSlug} (scrape_id: ${scrapeId})`);
   } catch (error) {
-    // Mark scrape as failed
-    await updateScrapeHistory(scrapeId, 'failed', 0, error.message);
+    // A cleanup failure does not invalidate a snapshot already made visible.
+    if (!published) await updateScrapeHistory(scrapeId, 'failed', 0, error.message);
     throw error;
   }
 }
