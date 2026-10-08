@@ -17,71 +17,74 @@ interface DealRow {
   image_url: string | null;
   product_url: string | null;
   scraped_at: string;
+  scrape_id: number | null;
   in_stock: number;
   retailer_slug: string;
   retailer_name: string;
 }
 
-// Mock data for local development
-const MOCK_RETAILERS: Retailer[] = [
-  { id: 1, name: 'Costco West', slug: 'costco', scrape_source: 'scraper' },
-  { id: 2, name: "Carter's Oshkosh", slug: 'carters', scrape_source: 'manual' },
-];
-
-const MOCK_DEALS: Deal[] = [
-  { id: 1, product_code: '1627198', product_name: 'DURACELL POWER BOOST AAA BATTERIES PACK OF 40', brand: 'Costco', regular_price: 25.99, sale_price: 19.99, savings_amount: 6, savings_percent: 23.1, category: 'Other', promo_type: 'Instant Savings', image_url: null, product_url: null, scraped_at: new Date().toISOString(), in_stock: 1, retailer_slug: 'costco', retailer_name: 'Costco West' },
-  { id: 2, product_code: '2945480', product_name: 'MONDETTA CORDUROY PANT WOMENS SIZES XL-XXL', brand: 'Costco', regular_price: 17.99, sale_price: 7.99, savings_amount: 10, savings_percent: 55.6, category: 'Other', promo_type: 'Instant Savings', image_url: null, product_url: null, scraped_at: new Date().toISOString(), in_stock: 1, retailer_slug: 'costco', retailer_name: 'Costco West' },
-];
+/**
+ * Reject an explicitly failed database result, even when the binding did not throw.
+ * @param result - D1 result with runtime success metadata.
+ * @returns Nothing on success.
+ * @throws Error if the database reports failure.
+ */
+function requireSuccessfulRead(result: { success?: boolean }): void {
+  if (result.success === false) throw new Error('Database read failed');
+}
 
 /**
  * Fetches active retailers and current deals from D1.
  * When a specific retailer is selected, fetches only that retailer's deals (no LIMIT).
  * Reads only the newest completed publication per retailer, plus legacy unversioned rows.
  * For "all" view, applies LIMIT 2000 to stay within Worker resource limits.
- * Falls back to mock data for local development.
+ * Returns a safe loading error if a binding or database read fails.
  *
  * @param {string} retailerSlug - Retailer slug to filter by, or 'all' for all retailers
- * @returns {Promise<{ deals: Deal[], retailers: Retailer[], retailerDates: Record<string, string>, flyerDates: string | null }>}
+ * @returns Published rows, per-store metadata, and a safe error on read failure.
  */
 async function getData(retailerSlug: string): Promise<{
   deals: Deal[];
   retailers: Retailer[];
-  retailerDates: Record<string, string>;
+  retailerDates: Record<string, string | null>;
+  retailerPaused: Record<string, boolean>;
+  evaluatedAt: string;
   flyerDates: string | null;
+  error: string | null;
 }> {
+  const evaluatedAt = new Date().toISOString();
   try {
     const { env } = getRequestContext();
     const db = env.DB;
 
-    if (!db) {
-      console.log('D1 not bound - using mock data for local preview');
-      return {
-        deals: MOCK_DEALS,
-        retailers: MOCK_RETAILERS,
-        retailerDates: { costco: new Date().toISOString(), carters: new Date().toISOString() },
-        flyerDates: 'January 19-25, 2026',
-      };
-    }
+    if (!db) throw new Error('Database unavailable');
 
     // Get active retailers
     const retailersResult = await db
       .prepare('SELECT id, name, slug, scrape_source FROM retailers WHERE is_active = 1 ORDER BY name')
       .all<Retailer>();
+    requireSuccessfulRead(retailersResult);
     const retailers = retailersResult.results || [];
 
     // Small source configuration read; avoid a history-table join that SQLite
     // can reorder into a full history scan for every retailer.
     const sourcesResult = await db.prepare(`
-      SELECT ss.id, ss.retailer_id
+      SELECT ss.id, ss.retailer_id, ss.is_active
       FROM scrape_sources ss
       JOIN retailers r ON ss.retailer_id = r.id
       WHERE r.is_active = 1
-    `).all<{ id: number; retailer_id: number }>();
+    `).all<{ id: number; retailer_id: number; is_active: number }>();
+    requireSuccessfulRead(sourcesResult);
     const sources = sourcesResult.results || [];
+    const retailerPaused: Record<string, boolean> = {};
+    for (const retailer of retailers) {
+      const retailerSources = sources.filter(source => source.retailer_id === retailer.id);
+      retailerPaused[retailer.slug] = retailerSources.length > 0 && retailerSources.every(source => source.is_active === 0);
+    }
 
     // One bounded result per active retailer, constrained by indexed source ids.
     // Keep displayed rows and timestamp tied to the same completed publication.
-    const retailerDates: Record<string, string> = {};
+    const retailerDates: Record<string, string | null> = {};
     const latestSnapshots: Array<{ retailerId: number; scrapeId: number }> = [];
     for (const retailer of retailers) {
       const sourceIds = sources.filter(source => source.retailer_id === retailer.id).map(source => source.id);
@@ -92,7 +95,7 @@ async function getData(retailerSlug: string): Promise<{
         WHERE sh.status = 'completed' AND sh.source_id IN (${sourceIds.map(() => '?').join(',')})
         ORDER BY sh.completed_at DESC, sh.id DESC
         LIMIT 1
-      `).bind(...sourceIds).first<{ scrape_id: number; completed_at: string }>();
+      `).bind(...sourceIds).first<{ scrape_id: number; completed_at: string | null }>();
       if (!latest) continue;
       retailerDates[retailer.slug] = latest.completed_at;
       latestSnapshots.push({ retailerId: retailer.id, scrapeId: latest.scrape_id });
@@ -119,14 +122,14 @@ async function getData(retailerSlug: string): Promise<{
     // Get current deals with retailer info
     // When a specific retailer is selected, filter server-side (no LIMIT needed)
     // For "all" view, apply LIMIT 2000 to stay within Worker resource limits
-    const today = new Date().toISOString().split('T')[0];
+    const today = evaluatedAt.split('T')[0];
     const isAllRetailers = retailerSlug === 'all';
 
     const dealsQuery = isAllRetailers
       ? db.prepare(`
           SELECT d.id, d.product_code, d.product_name, d.brand, d.regular_price, d.sale_price,
                  d.savings_amount, d.savings_percent, d.category, d.promo_type, d.image_url,
-                 d.product_url, d.scraped_at, COALESCE(d.in_stock, 1) as in_stock,
+                 d.product_url, d.scraped_at, d.scrape_id, COALESCE(d.in_stock, 1) as in_stock,
                  r.slug as retailer_slug, r.name as retailer_name
           FROM deals d
           JOIN retailers r ON d.retailer_id = r.id
@@ -143,7 +146,7 @@ async function getData(retailerSlug: string): Promise<{
       : db.prepare(`
           SELECT d.id, d.product_code, d.product_name, d.brand, d.regular_price, d.sale_price,
                  d.savings_amount, d.savings_percent, d.category, d.promo_type, d.image_url,
-                 d.product_url, d.scraped_at, COALESCE(d.in_stock, 1) as in_stock,
+                 d.product_url, d.scraped_at, d.scrape_id, COALESCE(d.in_stock, 1) as in_stock,
                  r.slug as retailer_slug, r.name as retailer_name
           FROM deals d
           JOIN retailers r ON d.retailer_id = r.id
@@ -160,23 +163,35 @@ async function getData(retailerSlug: string): Promise<{
 
     const dealsResult = await dealsQuery.all<DealRow>();
 
+    requireSuccessfulRead(dealsResult);
     return {
-      deals: dealsResult.results || [],
+      deals: (dealsResult.results || []).map(row => ({
+        ...row,
+        published_at: row.scrape_id === null ? null : retailerDates[row.retailer_slug] || null,
+      })),
       retailers,
       retailerDates,
+      retailerPaused,
+      evaluatedAt,
       flyerDates,
+      error: null,
     };
-  } catch (error) {
-    console.log('D1 error - using mock data:', error);
+  } catch {
+    // Do not expose database errors or replace failed reads with demo products.
+    console.error('Deals database read failed');
     return {
-      deals: MOCK_DEALS,
-      retailers: MOCK_RETAILERS,
-      retailerDates: { costco: new Date().toISOString(), carters: new Date().toISOString() },
-      flyerDates: 'January 19-25, 2026',
+      deals: [],
+      retailers: [],
+      retailerDates: {},
+      retailerPaused: {},
+      evaluatedAt,
+      flyerDates: null,
+      error: 'Deals could not be loaded. Please try again later.',
     };
   }
 }
 
+/** Render published deals or a safe, visible database loading error. */
 export default async function Home({
   searchParams,
 }: {
@@ -184,7 +199,20 @@ export default async function Home({
 }) {
   const params = await searchParams;
   const retailerSlug = params.retailer || 'costco';
-  const { deals, retailers, retailerDates, flyerDates } = await getData(retailerSlug);
+  const { deals, retailers, retailerDates, retailerPaused, evaluatedAt, flyerDates, error } = await getData(retailerSlug);
+
+  if (error) {
+    return (
+      <main className="container">
+        <header><h1>Deals</h1></header>
+        <div className="empty-state" role="alert">
+          <p>{error}</p>
+          <p>Saved prices have not been replaced. Reload this page to try again.</p>
+          <a href="https://github.com/hkonnection/price-scraper/actions">Actions run history</a>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="container">
@@ -192,6 +220,8 @@ export default async function Home({
         deals={deals}
         retailers={retailers}
         retailerDates={retailerDates}
+        retailerPaused={retailerPaused}
+        evaluatedAt={evaluatedAt}
         flyerDates={flyerDates}
       />
     </main>

@@ -32,6 +32,8 @@ node scraper/local/lululemon-macos.mjs run --dry-run
 
 Both commands force `LULULEMON_VISIBLE_CHROME=1` and pass `--dry-run` to the existing entrypoint. They do not read a credential file. They discard inherited Cloudflare values, Node preload settings, dotenv settings and browser overrides in the child environment. The current Lululemon import graph does not load dotenv.
 
+Use a trusted Node executable and launch environment. A Node startup preload can run before the wrapper code. Child environment isolation cannot protect an already-untrusted launching interpreter. The generated LaunchAgent clears `NODE_OPTIONS` and `NODE_PATH` before Node starts.
+
 A refused request, empty result or child failure exits nonzero. The child exit code is preserved. A signal or spawn failure returns 1. There is no refusal retry. A successful test must report a positive cleaned count from the real retailer, not a synthetic fixture count.
 
 No live catalog probe was made for this change. Offline tests use a copied actual entrypoint and scraper with a synthetic browser and publisher. They deny network access. Their counts are not retailer evidence. Run the real Intel no-write test after merge, without credentials, before enabling publication.
@@ -87,7 +89,9 @@ Setup records the resolved absolute Node executable and script paths in separate
 
 Setup targets only `gui/<current uid>/com.price-scraper.lululemon`. It never uses a privileged domain. It does not use `RunAtLoad`, `KeepAlive`, `kickstart`, `kill` or `stop`. Setup does not invoke collection. If a calendar event arrives during setup, the shared lock refuses the consumer instead of allowing publication.
 
-Repeat installation is safe. Matching loaded configuration is not reloaded. An unloaded matching configuration is loaded. A candidate is syntax-checked before the prior job is removed. The prior plist remains in place until the new bootstrap succeeds. On replacement failure, setup restores the previous loaded state when safe and reports failure. It does not kill an active job. A partial replacement can be retried with the same command after its prerequisites are fixed.
+Repeat installation is safe. Every inactive loaded job is reloaded from the validated candidate, even when its disk plist matches. Disk equality and PID status do not prove the loaded arguments. This makes a successful no-write setup replace a stale loaded publication configuration. A candidate is syntax-checked before the prior job is removed. The prior plist remains in place until the new bootstrap succeeds. Setup refuses to change a loaded job if its prior disk plist is missing, because rollback cannot recover it. It does not kill an active job.
+
+On replacement failure, setup returns nonzero. If a prior loaded job had a safe disk plist, setup reloads that plist and checks that this label is loaded. It does not claim that the old in-memory arguments were restored. Those arguments may have differed from disk. Check the reported mode and retry setup. No-write mode is confirmed only after successful replacement. A partial replacement can be retried after its prerequisites are fixed.
 
 ## Activate timed publication later
 
@@ -119,7 +123,7 @@ The state directory and lock use mode 700. Log files use mode 600. Unsafe existi
 
 If the publisher or setup is busy, wait for completion and retry. No process is killed. A crash can leave the empty lock directory in place. Confirm that the local Node and Chrome run has ended before removing only that empty `run.lock` with `rmdir`. Do not automatically steal or delete a busy lock. A calendar event refused by the lock is not retried by this command.
 
-If replacement validation or a dependency check fails, fix the reported prerequisite and rerun setup. The previous plist is kept. If rollback cannot safely restore a loaded service, setup returns nonzero and reports the recovery limit. Do not remove unrelated agents or manually publish to test setup.
+If replacement validation or a dependency check fails, fix the reported prerequisite and rerun setup. The previous disk plist is kept. If a loaded job has no prior disk plist, setup leaves it loaded and makes no replacement. Restore a validated private copy of its prior plist before retrying. If that configuration is unknown, stop and resolve it with the operator. Do not invent the old arguments or publish to recover. If rollback cannot safely reload the prior disk configuration, setup returns nonzero and reports the recovery limit. Do not remove unrelated agents or manually publish to test setup.
 
 ## Offline validation
 

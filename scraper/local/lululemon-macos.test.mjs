@@ -89,7 +89,7 @@ globalThis.setTimeout=(fn)=>{queueMicrotask(fn);return 0;};`);
   fs.writeFileSync(credentialFile, envText, { mode: 0o600 });
   fs.writeFileSync(path.join(repo, '.github/workflows/scrape-lululemon.yml'), 'on:\n  workflow_dispatch:\n');
   const calls = [], output = [];
-  const state = { loaded: false, pid: '-', failBootstrap: false, invalid: false, gui: true, failBootout: false };
+  const state = { loaded: false, loadedText: null, pid: '-', failBootstrap: false, invalid: false, gui: true, failBootout: false };
   /** Simulate launchctl and plist validation without contacting actual launchd. @returns {object} Exit and output. */
   function system(executable, args) {
     calls.push([executable, ...args]);
@@ -104,10 +104,10 @@ globalThis.setTimeout=(fn)=>{queueMicrotask(fn);return 0;};`);
     }
     if (args[0] === 'print') return { status: state.gui ? 0 : 1, stdout: '', stderr: '' };
     if (args[0] === 'list') return { status: 0, stdout: `PID\tStatus\tLabel\n${state.loaded ? `${state.pid}\t0\tcom.price-scraper.lululemon\n` : ''}`, stderr: '' };
-    if (args[0] === 'bootout') { if (state.failBootout) return { status: 1, stdout: '', stderr: '' }; state.loaded = false; return { status: 0, stdout: '', stderr: '' }; }
+    if (args[0] === 'bootout') { if (state.failBootout) return { status: 1, stdout: '', stderr: '' }; state.loaded = false; state.loadedText = null; return { status: 0, stdout: '', stderr: '' }; }
     if (args[0] === 'bootstrap') {
       if (state.failBootstrap) { state.failBootstrap = false; return { status: 5, stdout: '', stderr: '' }; }
-      state.loaded = true; return { status: 0, stdout: '', stderr: '' };
+      state.loaded = true; state.loadedText = fs.readFileSync(args.at(-1), 'utf8'); return { status: 0, stdout: '', stderr: '' };
     }
     throw new Error('Unexpected system command');
   }
@@ -119,6 +119,13 @@ globalThis.setTimeout=(fn)=>{queueMicrotask(fn);return 0;};`);
 function events(f) { return fs.existsSync(f.trace) ? fs.readFileSync(f.trace, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []; }
 /** Find the installed plist. @param {object} f Fixture. @returns {string} Plist path. */
 function plist(f) { return path.join(f.home, 'Library/LaunchAgents/com.price-scraper.lululemon.plist'); }
+/** Execute the fake system's loaded vector, not the disk plist. @param {object} f Fixture with loaded XML. @returns {object} Actual copied CLI result from the synthetic consumer. */
+function consumeLoaded(f) {
+  const vector = [...f.state.loadedText.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)[1].matchAll(/<string>(.*?)<\/string>/g)]
+    .map(m => m[1].replaceAll('&quot;', '"').replaceAll('&apos;', "'").replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&'));
+  return spawnSync(vector[0], vector.slice(1), { encoding: 'utf8', env: { HOME: f.home, PATH: '/usr/bin:/bin' } });
+}
+
 /** Check private log and lock state after a completed operation. @param {object} f Fixture. @returns {void} */
 function cleanState(f) {
   const state = path.join(f.home, 'Library/Application Support/price-scraper/lululemon');
@@ -275,20 +282,62 @@ test('first, repeat and partial install preserve old config and never start a co
   const f = fixture(); assert.equal(await main(['setup', '--install'], f.runtime), 0);
   const prior = fs.readFileSync(plist(f)); const before = f.calls.length;
   assert.equal(await main(['setup', '--install'], f.runtime), 0);
-  assert.equal(f.calls.slice(before).some(c => ['bootstrap', 'bootout'].includes(c[1])), false);
+  assert.equal(f.calls.slice(before).filter(c => c[1] === 'bootout').length, 1);
+  assert.equal(f.calls.slice(before).filter(c => c[1] === 'bootstrap').length, 1);
   assert.deepEqual(fs.readFileSync(plist(f)), prior);
+  assert.equal(f.state.loadedText, prior.toString());
   f.state.loaded = false;
   assert.equal(await main(['setup', '--install'], f.runtime), 0);
   assert.equal(f.state.loaded, true);
   f.runtime.node = process.execPath; f.state.failBootstrap = true;
   assert.notEqual(await main(['setup', '--install'], f.runtime), 0);
   assert.deepEqual(fs.readFileSync(plist(f)), prior); assert.equal(f.state.loaded, true);
+  assert.equal(f.state.loadedText, prior.toString());
+  assert.match(f.output.at(-1), /prior disk plist was reloaded/);
+  assert.doesNotMatch(f.output.at(-1), /previous loaded state was restored/);
   f.state.invalid = true;
   const calls = f.calls.length;
   assert.notEqual(await main(['setup', '--install'], f.runtime), 0);
   assert.equal(f.calls.slice(calls).some(c => c[1] === 'bootout'), false);
   assert.deepEqual(fs.readFileSync(plist(f)), prior);
   assert.equal(events(f).length, 0); assert.equal(f.calls.some(c => ['kickstart', 'kill', 'stop'].includes(c[1])), false);
+  cleanState(f);
+});
+
+test('review regression R1: no-write setup replaces a stale loaded publication even when disk matches', async () => {
+  const f = fixture();
+  assert.equal(await main(['setup', '--install', '--publish', '--credentials', f.credentialFile, '--github-schedule-off'], f.runtime), 0);
+  const priorLoaded = f.state.loadedText;
+  assert.match(priorLoaded, /--publish/);
+  fs.writeFileSync(plist(f), makePlist({ ...f.runtime, publish: false }));
+  const before = f.calls.length;
+  assert.equal(await main(['setup', '--install'], f.runtime), 0);
+  const result = consumeLoaded(f);
+  assert.equal(result.status, 0, result.stderr);
+  const fakePublication = events(f).filter(e => e.kind === 'fake-publish').length;
+  console.log(`INSTALL_R1 loadedPublish=${f.state.loadedText.includes('--publish')} reloaded=${f.calls.slice(before).some(c => c[1] === 'bootstrap')} consumerExit=${result.status} fakePublication=${fakePublication} remoteWrites=0`);
+  assert.equal(fakePublication, 0);
+  assert.match(f.state.loadedText, /--dry-run/);
+  assert.notEqual(f.state.loadedText, priorLoaded);
+  assert.equal(f.calls.slice(before).filter(c => c[1] === 'bootout').length, 1);
+  assert.equal(f.calls.slice(before).filter(c => c[1] === 'bootstrap').length, 1);
+  cleanState(f);
+});
+
+test('review regression R2: loaded job with missing prior plist is refused without unloading', async () => {
+  const f = fixture();
+  assert.equal(await main(['setup', '--install'], f.runtime), 0);
+  const priorLoaded = f.state.loadedText;
+  fs.unlinkSync(plist(f)); f.state.failBootstrap = true;
+  const before = f.calls.length;
+  assert.equal(await main(['setup', '--install'], f.runtime), 1);
+  console.log(`INSTALL_R2 loaded=${f.state.loaded} mutated=${f.calls.slice(before).some(c => ['bootout', 'bootstrap'].includes(c[1]))} restoredClaim=${f.output.at(-1).includes('restored')} remoteWrites=0`);
+  assert.equal(f.state.loaded, true);
+  assert.equal(f.state.loadedText, priorLoaded);
+  assert.equal(f.calls.slice(before).some(c => ['bootout', 'bootstrap'].includes(c[1])), false);
+  assert.match(f.output.at(-1), /prior plist is missing/i);
+  assert.doesNotMatch(f.output.at(-1), /restored/);
+  assert.equal(events(f).length, 0);
   cleanState(f);
 });
 
@@ -380,6 +429,17 @@ test('timed publication refuses without both removed GitHub calendar and explici
   const text = fs.readFileSync(plist(f), 'utf8');
   Object.values(credentials).forEach(v => assert.equal(text.includes(v), false));
   assert.match(text, /--publish/); assert.match(text, /--credentials/); assert.equal(events(f).length, 0);
+  // Counter-direction torn state: disk says publish, but the inactive loaded vector is dry.
+  f.state.loadedText = makePlist({ ...f.runtime, publish: false });
+  assert.equal(await main([...args, '--github-schedule-off'], f.runtime), 0);
+  assert.equal(f.state.loadedText, text);
+  assert.equal(events(f).length, 0, 'Setup itself must not invoke a publisher');
+  const result = consumeLoaded(f);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(events(f).filter(e => e.kind === 'fake-publish').length, 1);
+  Object.values(credentials).forEach(value => assert.equal((result.stdout + result.stderr).includes(value), false));
+  console.log('INSTALL_PUBLISH loadedPublish=true setupPublishCalls=0 consumerExit=0 fakePublication=1 remoteWrites=0');
+  cleanState(f);
 });
 
 test('CLI rejects malformed flags with nonzero status and no runtime overrides', () => {
@@ -388,14 +448,13 @@ test('CLI rejects malformed flags with nonzero status and no runtime overrides',
 });
 
 test('ordered offline operator smoke: happy then negative then state', async t => {
-  const happy = fixture(), negative = fixture();
+  const happy = fixture(), negative = fixture(), missing = fixture();
   await t.test('phase 1 happy command and setup consumer', async () => {
     assert.equal(await main([], happy.runtime), 0);
     assert.equal(await main(['setup', '--install'], happy.runtime), 0);
-    // Consume the exact plist arguments, with only the fake Node/preload in this isolated home.
-    const xml = fs.readFileSync(plist(happy), 'utf8');
-    const vector = [...xml.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)[1].matchAll(/<string>(.*?)<\/string>/g)].map(m => m[1].replaceAll('&amp;', '&').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&quot;', '"'));
-    const result = spawnSync(vector[0], vector.slice(1), { encoding: 'utf8', env: { HOME: happy.home, PATH: '/usr/bin:/bin' } });
+    assert.equal(happy.state.loadedText, fs.readFileSync(plist(happy), 'utf8'));
+    // Consume the fake system's exact loaded arguments, not only the disk plist.
+    const result = consumeLoaded(happy);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Would have pushed \d+ deals/);
     const cleanedRows = Number(result.stdout.match(/Would have pushed (\d+) deals/)[1]);
@@ -419,10 +478,31 @@ test('ordered offline operator smoke: happy then negative then state', async t =
     assert.equal(await main(['setup', '--install'], happy.runtime), 1);
     assert.equal(happy.state.loaded, true);
     assert.deepEqual(fs.readFileSync(plist(happy)), prior);
-    console.log('LOCAL_SMOKE_NEGATIVE empty=1 unsafeCredentials=1 activePublisher=1 wrongZone=1 invalidReplacement=1 bootstrapFailure=1; priorPlistPreserved=true rollbackLoaded=true noKill=true');
+    assert.equal(happy.state.loadedText, prior.toString());
+    // Recreate both independent installation counterexamples without any real job.
+    assert.equal(await main(['setup', '--install'], happy.runtime), 0);
+    assert.equal(fs.readFileSync(plist(happy), 'utf8'), makePlist({ ...happy.runtime, publish: false }));
+    happy.state.loadedText = makePlist({ ...happy.runtime, publish: true, credentials: happy.credentialFile });
+    assert.equal(await main(['setup', '--install'], happy.runtime), 0);
+    assert.match(happy.state.loadedText, /--dry-run/);
+    const consumer = consumeLoaded(happy);
+    assert.equal(consumer.status, 0, consumer.stderr);
+    assert.equal(events(happy).filter(e => e.kind === 'fake-publish').length, 0);
+    assert.equal(await main(['setup', '--install'], missing.runtime), 0);
+    const priorLoaded = missing.state.loadedText;
+    fs.unlinkSync(plist(missing)); missing.state.failBootstrap = true;
+    const before = missing.calls.length;
+    assert.equal(await main(['setup', '--install'], missing.runtime), 1);
+    assert.equal(missing.state.loadedText, priorLoaded);
+    assert.equal(missing.calls.slice(before).some(c => ['bootout', 'bootstrap'].includes(c[1])), false);
+    assert.doesNotMatch(missing.output.at(-1), /restored/);
+    console.log('LOCAL_SMOKE_NEGATIVE empty=1 unsafeCredentials=1 activePublisher=1 wrongZone=1 invalidReplacement=1 bootstrapFailure=1 missingPrior=1; priorPlistPreserved=true rollbackLoaded=true stalePublishRemoved=true missingLoadedPreserved=true noKill=true');
   });
   await t.test('phase 3 state verification', () => {
-    cleanState(happy); cleanState(negative);
+    cleanState(happy); cleanState(negative); cleanState(missing);
+    assert.match(happy.state.loadedText, /--dry-run/);
+    assert.equal(missing.state.loaded, true);
+    assert.equal(events(missing).length, 0);
     assert.equal(events(happy).filter(e => e.kind === 'fake-publish').length, 0);
     assert.equal(events(negative).filter(e => e.kind === 'fake-publish').length, 0);
     assert.equal(happy.calls.every(c => !['kill', 'kickstart', 'stop'].includes(c[1])), true);

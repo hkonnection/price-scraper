@@ -183,7 +183,7 @@ function service(r) {
   return matches[0] ? { active: matches[0][0] !== '-', pid: matches[0][0] } : null;
 }
 
-/** Install a validated candidate, keeping the prior file until bootstrap succeeds. @param {object} r Runtime. @returns {Promise<number>} Exit status. @throws {Error} On busy state or failed replacement. */
+/** Reload an inactive job from a validated candidate, keeping the prior file until bootstrap succeeds. A loaded job needs a recoverable prior disk plist. @param {object} r Runtime. @returns {Promise<number>} Exit status. @throws {Error} On busy state, missing prior configuration or failed replacement. */
 async function install(r) {
   return withLock(r, async () => {
     checked(r, '/bin/launchctl', ['print', `gui/${r.uid}`]);
@@ -192,20 +192,21 @@ async function install(r) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const target = path.join(dir, `${LABEL}.plist`);
     trustedPath(target, r, true);
-    if (fs.existsSync(target)) {
+    const priorExists = fs.existsSync(target);
+    if (priorExists) {
       privateFile(target, r);
       const prior = JSON.parse(checked(r, '/usr/bin/plutil', ['-convert', 'json', '-o', '-', target]));
       if (prior.Label !== LABEL) throw new Error('Existing plist has another label. No agent was changed.');
     }
-    let loaded = service(r);
+    const loaded = service(r);
     if (loaded?.active) throw new Error('LaunchAgent is active. Wait for it to finish, then retry. No process was killed.');
+    if (loaded && !priorExists) throw new Error('LaunchAgent is loaded but its prior plist is missing. No agent was changed. Restore its validated prior plist, then retry setup. Do not publish to recover.');
     const text = makePlist(r);
     const candidate = path.join(r.stateDir, `candidate-${process.pid}.plist`);
     fs.writeFileSync(candidate, text, { flag: 'wx', mode: 0o600 });
     try {
       checked(r, '/usr/bin/plutil', ['-lint', candidate]);
-      const priorExists = fs.existsSync(target);
-      if (priorExists && fs.readFileSync(target, 'utf8') === text && loaded) { r.emit('LaunchAgent already matches. No reload and no collection.'); return 0; }
+      // Disk equality cannot prove loaded arguments. Reload only while the shared lock is held.
       if (loaded) checked(r, '/bin/launchctl', ['bootout', `gui/${r.uid}/${LABEL}`]);
       try {
         checked(r, '/bin/launchctl', ['bootstrap', `gui/${r.uid}`, candidate]);
@@ -213,10 +214,14 @@ async function install(r) {
       } catch {
         // Only this label can be rolled back. Refuse any unexpected active process.
         const partial = service(r);
-        if (partial?.active) throw new Error('Replacement has an active process. Prior plist remains on disk. Wait for completion and rerun setup. No process was killed.');
+        if (partial?.active) throw new Error('Replacement has an active process. Disk configuration was not replaced. Wait for completion and rerun setup. No process was killed.');
         if (partial) checked(r, '/bin/launchctl', ['bootout', `gui/${r.uid}/${LABEL}`]);
-        if (loaded && priorExists) checked(r, '/bin/launchctl', ['bootstrap', `gui/${r.uid}`, target]);
-        throw new Error('Replacement failed. Prior plist is preserved and its prior loaded state was restored. Fix prerequisites and rerun setup.');
+        if (loaded) {
+          checked(r, '/bin/launchctl', ['bootstrap', `gui/${r.uid}`, target]);
+          if (!service(r)) throw new Error('Rollback did not load the prior disk plist. It remains on disk. Verify this label and retry setup; do not publish to recover.');
+          throw new Error('Replacement failed. The prior disk plist was reloaded; its previous in-memory arguments were not verified. Check its mode and retry setup.');
+        }
+        throw new Error('Replacement failed. No prior loaded job was restored. Existing disk configuration was not replaced. Fix prerequisites and retry setup.');
       }
       r.emit('LaunchAgent installed. Monday and Thursday 08:00 host Pacific civil time. Setup did not start a collection.');
       return 0;
