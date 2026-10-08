@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState } from 'react';
+import type { SortKey } from './DealsPageClient';
 
 interface Deal {
   id: number;
@@ -25,10 +26,11 @@ interface DealsTableProps {
   deals: Deal[];
   lastUpdated: string | null;
   showRetailer?: boolean;
+  sortKey: SortKey;
+  sortDirection: 'asc' | 'desc';
+  pending: boolean;
+  onSort: (key: SortKey, direction: 'asc' | 'desc') => void;
 }
-
-type SortKey = 'product_name' | 'regular_price' | 'sale_price' | 'savings_amount' | 'savings_percent' | 'category' | 'retailer_name';
-type SortDirection = 'asc' | 'desc';
 
 /**
  * Formats a date string to "Jan 24, 2026, 9:18:52 PM" format.
@@ -78,57 +80,27 @@ function getRetailerBadgeClass(slug: string): string {
 }
 
 /**
- * Sortable deals table component.
- * Displays product deals with clickable column headers for sorting.
- * Optionally shows retailer column when viewing all retailers.
+ * Render the server-ordered page and request full-result sorting through its parent.
+ * @param props - Bounded rows, selected sort, publication date, and navigation callback.
+ * @returns The existing table and image modal.
  */
-export default function DealsTable({ deals, lastUpdated, showRetailer = false }: DealsTableProps) {
-  const [sortKey, setSortKey] = useState<SortKey>('savings_percent');
-  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+export default function DealsTable({ deals, lastUpdated, showRetailer = false, sortKey, sortDirection, pending, onSort }: DealsTableProps) {
   const [modalImage, setModalImage] = useState<{ url: string; name: string } | null>(null);
 
-  const sortedDeals = useMemo(() => {
-    return [...deals].sort((a, b) => {
-      // Out-of-stock items always go to bottom
-      if (a.in_stock !== b.in_stock) {
-        return b.in_stock - a.in_stock; // in_stock=1 first, in_stock=0 last
-      }
-
-      const aVal = a[sortKey];
-      const bVal = b[sortKey];
-
-      if (aVal == null && bVal == null) return 0;
-      if (aVal == null) return 1;
-      if (bVal == null) return -1;
-
-      if (typeof aVal === 'string' && typeof bVal === 'string') {
-        return sortDirection === 'asc'
-          ? aVal.localeCompare(bVal)
-          : bVal.localeCompare(aVal);
-      }
-
-      if (typeof aVal === 'number' && typeof bVal === 'number') {
-        return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
-      }
-
-      return 0;
-    });
-  }, [deals, sortKey, sortDirection]);
-
+  /** Request a server sort with the existing text and numeric defaults. */
   const handleSort = (key: SortKey) => {
-    if (sortKey === key) {
-      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
-    } else {
-      setSortKey(key);
-      setSortDirection(key === 'product_name' || key === 'category' || key === 'retailer_name' ? 'asc' : 'desc');
-    }
+    if (pending) return;
+    onSort(key, sortKey === key ? (sortDirection === 'asc' ? 'desc' : 'asc')
+      : (key === 'product_name' || key === 'category' || key === 'retailer_name' ? 'asc' : 'desc'));
   };
 
+  /** Return the class for the selected server sort. */
   const getSortClass = (key: SortKey) => {
     if (sortKey !== key) return 'sortable';
     return sortDirection === 'asc' ? 'sortable sorted-asc' : 'sortable sorted-desc';
   };
 
+  /** Return the existing savings badge class. */
   const getSavingsClass = (percent: number) => {
     if (percent >= 40) return 'savings-percent very-high';
     if (percent >= 30) return 'savings-percent high';
@@ -211,7 +183,7 @@ export default function DealsTable({ deals, lastUpdated, showRetailer = false }:
             </tr>
           </thead>
           <tbody>
-            {sortedDeals.map((deal) => (
+            {deals.map((deal) => (
               <tr key={deal.id} className={deal.in_stock === 0 ? 'sold-out-row' : ''}>
                 {showRetailer && (
                   <td>

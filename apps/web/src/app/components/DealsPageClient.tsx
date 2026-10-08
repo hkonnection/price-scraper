@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
-import { useSearchParams, useRouter } from 'next/navigation';
+import { useState, useTransition } from 'react';
+import { useRouter } from 'next/navigation';
 import DealsTable from './DealsTable';
 import ImportModal from './ImportModal';
 import RefreshButton from './RefreshButton';
@@ -32,7 +32,26 @@ export interface Deal {
   retailer_name: string;
 }
 
-interface DealsPageClientProps {
+export type SortKey = 'product_name' | 'regular_price' | 'sale_price' | 'savings_amount' | 'savings_percent' | 'category' | 'retailer_name';
+
+export interface Paging {
+  total: number;
+  avgSavings: number;
+  topSaving: number;
+  categories: string[];
+  promoTypes: string[];
+  retailerSlug: string;
+  category: string;
+  promo: string;
+  sort: SortKey;
+  direction: 'asc' | 'desc';
+  size: number;
+  offset: number;
+  publication: string;
+  publicationReset: boolean;
+}
+
+interface DealsPageClientProps extends Paging {
   deals: Deal[];
   retailers: Retailer[];
   retailerDates: Record<string, string>;
@@ -40,74 +59,38 @@ interface DealsPageClientProps {
 }
 
 /**
- * Client-side wrapper that manages retailer/category/sale-type filters,
- * stats display, import modal, and renders the DealsTable.
+ * Render the server page and send every browsing control back to the server.
+ * @param props - Rows, full matching totals, options, and validated page state.
+ * @returns The existing deals layout with bounded URL-driven browsing.
  */
-export default function DealsPageClient({ deals, retailers, retailerDates, flyerDates }: DealsPageClientProps) {
-  const searchParams = useSearchParams();
+export default function DealsPageClient({ deals, retailers, retailerDates, flyerDates, total, avgSavings, topSaving,
+  categories, promoTypes, retailerSlug: selectedRetailer, category: selectedCategory, promo: selectedPromoType,
+  sort, direction, size: pageSize, offset, publication, publicationReset }: DealsPageClientProps) {
   const router = useRouter();
-
-  // Initialize retailer from URL param, default to 'costco'
-  const initialRetailer = searchParams.get('retailer') || 'costco';
-  const [selectedRetailer, setSelectedRetailer] = useState(initialRetailer);
-  const [selectedCategory, setSelectedCategory] = useState('all');
-  const [selectedPromoType, setSelectedPromoType] = useState('all');
+  const [pending, startTransition] = useTransition();
   const [showImportModal, setShowImportModal] = useState(false);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState(500);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const currentPage = Math.floor(offset / pageSize) + 1;
 
-  // Sync URL when retailer changes
-  useEffect(() => {
-    const currentParam = searchParams.get('retailer');
-    if (selectedRetailer !== currentParam) {
-      const url = selectedRetailer === 'costco'
-        ? '/'
-        : `/?retailer=${selectedRetailer}`;
-      router.replace(url, { scroll: false });
+  /**
+   * Navigate with the current server scope; reset the offset for control changes.
+   * @param changes - Validated UI control values to replace.
+   * @returns Nothing; starts a server navigation.
+   */
+  const navigate = (changes: Record<string, string>) => {
+    const params = new URLSearchParams({ retailer: selectedRetailer, category: selectedCategory, promo: selectedPromoType,
+      sort, direction, size: String(pageSize), offset: '0', publication, ...changes });
+    if (changes.retailer !== undefined) {
+      params.delete('publication');
+      params.set('category', 'all');
+      params.set('promo', 'all');
     }
-  }, [selectedRetailer, searchParams, router]);
-
-  const filteredDeals = useMemo(() => {
-    return deals.filter(deal => {
-      if (selectedRetailer !== 'all' && deal.retailer_slug !== selectedRetailer) return false;
-      if (selectedCategory !== 'all' && deal.category !== selectedCategory) return false;
-      if (selectedPromoType !== 'all' && deal.promo_type !== selectedPromoType) return false;
-      return true;
-    });
-  }, [deals, selectedRetailer, selectedCategory, selectedPromoType]);
-
-  // Pagination calculations
-  const totalPages = pageSize === 0 ? 1 : Math.ceil(filteredDeals.length / pageSize);
-  const paginatedDeals = useMemo(() => {
-    if (pageSize === 0) return filteredDeals; // "All" option
-    const start = (currentPage - 1) * pageSize;
-    return filteredDeals.slice(start, start + pageSize);
-  }, [filteredDeals, currentPage, pageSize]);
-
-  // Reset to page 1 when filters change
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [selectedRetailer, selectedCategory, selectedPromoType, pageSize]);
-
-  const categories = useMemo(() => {
-    const relevant = selectedRetailer === 'all' ? deals : deals.filter(d => d.retailer_slug === selectedRetailer);
-    return Array.from(new Set(relevant.map(d => d.category).filter(Boolean))).sort();
-  }, [deals, selectedRetailer]);
-
-  const promoTypes = useMemo(() => {
-    const relevant = selectedRetailer === 'all' ? deals : deals.filter(d => d.retailer_slug === selectedRetailer);
-    return Array.from(new Set(relevant.map(d => d.promo_type).filter(Boolean) as string[])).sort();
-  }, [deals, selectedRetailer]);
+    startTransition(() => router.replace(`/?${params.toString()}`, { scroll: false }));
+  };
 
   const activeRetailer = retailers.find(r => r.slug === selectedRetailer);
   const showImportButton = activeRetailer?.scrape_source === 'manual';
   const showRefreshButton = activeRetailer && activeRetailer.scrape_source !== 'manual' && selectedRetailer !== 'all';
-
-  const totalDeals = filteredDeals.length;
-  const avgSavings = totalDeals > 0
-    ? filteredDeals.reduce((sum, d) => sum + d.savings_percent, 0) / totalDeals
-    : 0;
-  const topSaving = totalDeals > 0 ? Math.max(...filteredDeals.map(d => d.savings_percent)) : 0;
 
   const headerTitle = selectedRetailer === 'all'
     ? 'All Retailer Deals'
@@ -123,15 +106,6 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
   const lastUpdated = selectedRetailer === 'all'
     ? null
     : retailerDates[selectedRetailer] || null;
-
-  /**
-   * Resets category/promo filters when retailer changes.
-   */
-  const handleRetailerChange = (slug: string) => {
-    setSelectedRetailer(slug);
-    setSelectedCategory('all');
-    setSelectedPromoType('all');
-  };
 
   return (
     <>
@@ -163,7 +137,8 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
           <select
             id="retailer-filter"
             value={selectedRetailer}
-            onChange={(e) => handleRetailerChange(e.target.value)}
+            disabled={pending}
+            onChange={(e) => navigate({ retailer: e.target.value })}
           >
             <option value="all">All Retailers</option>
             {retailers.map(r => (
@@ -178,7 +153,8 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
             <select
               id="category-filter"
               value={selectedCategory}
-              onChange={(e) => setSelectedCategory(e.target.value)}
+              disabled={pending}
+              onChange={(e) => navigate({ category: e.target.value })}
             >
               <option value="all">All Categories</option>
               {categories.map(c => (
@@ -194,7 +170,8 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
             <select
               id="promo-filter"
               value={selectedPromoType}
-              onChange={(e) => setSelectedPromoType(e.target.value)}
+              disabled={pending}
+              onChange={(e) => navigate({ promo: e.target.value })}
             >
               <option value="all">All Types</option>
               {promoTypes.map(p => (
@@ -207,8 +184,8 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
 
       <div className="stats">
         <div className="stat-card">
-          <div className="value">{totalDeals}</div>
-          <div className="label">Total Deals</div>
+          <div className="value">{total}</div>
+          <div className="label">Total Matches</div>
         </div>
         <div className="stat-card">
           <div className="value">{avgSavings.toFixed(0)}%</div>
@@ -220,45 +197,47 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
         </div>
       </div>
 
-      <div className="pagination-controls">
+      {publicationReset && <p role="status">The publication changed. Browsing restarted at the first page.</p>}
+      <div className="pagination-controls" aria-busy={pending}>
         <div className="pagination-info">
-          Showing {paginatedDeals.length} of {filteredDeals.length} deals
-          {pageSize > 0 && ` (Page ${currentPage} of ${totalPages})`}
+          Loaded {deals.length} of {total} matching deals
+          {currentPage <= totalPages ? ` (Page ${currentPage} of ${totalPages})` : ' (No matches at this offset)'}
+          {pending && ' Loading...'}
         </div>
         <div className="pagination-actions">
           <label htmlFor="page-size">Per page:</label>
           <select
             id="page-size"
             value={pageSize}
-            onChange={(e) => setPageSize(Number(e.target.value))}
+            disabled={pending}
+            onChange={(e) => navigate({ size: e.target.value })}
           >
             <option value={500}>500</option>
             <option value={1000}>1000</option>
-            <option value={0}>All</option>
           </select>
-          {pageSize > 0 && (
-            <>
-              <button
-                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                disabled={currentPage === 1}
-                className="pagination-button"
-              >
-                ← Prev
-              </button>
-              <button
-                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                disabled={currentPage === totalPages}
-                className="pagination-button"
-              >
-                Next →
-              </button>
-            </>
-          )}
+          <button
+            onClick={() => navigate({ offset: String(Math.max(0, offset - pageSize)) })}
+            disabled={pending || offset === 0}
+            className="pagination-button"
+          >
+            ← Prev
+          </button>
+          <button
+            onClick={() => navigate({ offset: String(offset + pageSize) })}
+            disabled={pending || offset + pageSize >= total}
+            className="pagination-button"
+          >
+            Next →
+          </button>
         </div>
       </div>
 
       <DealsTable
-        deals={paginatedDeals}
+        deals={deals}
+        sortKey={sort}
+        sortDirection={direction}
+        pending={pending}
+        onSort={(key, nextDirection) => navigate({ sort: key, direction: nextDirection })}
         lastUpdated={lastUpdated}
         showRetailer={selectedRetailer === 'all'}
       />
