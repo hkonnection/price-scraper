@@ -1,10 +1,8 @@
 'use client';
 
-import { useState, useTransition } from 'react';
+import { useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import DealsTable from './DealsTable';
-import ImportModal from './ImportModal';
-import RefreshButton from './RefreshButton';
 
 export interface Retailer {
   id: number;
@@ -59,7 +57,7 @@ interface DealsPageClientProps extends Paging {
 }
 
 /**
- * Render the server page and send every browsing control back to the server.
+ * Render the read-only server page and send browsing controls back to the server.
  * @param props - Rows, full matching totals, options, and validated page state.
  * @returns The existing deals layout with bounded URL-driven browsing.
  */
@@ -68,7 +66,6 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
   sort, direction, size: pageSize, offset, publication, publicationReset }: DealsPageClientProps) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [showImportModal, setShowImportModal] = useState(false);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const currentPage = Math.floor(offset / pageSize) + 1;
 
@@ -89,8 +86,6 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
   };
 
   const activeRetailer = retailers.find(r => r.slug === selectedRetailer);
-  const showImportButton = activeRetailer?.scrape_source === 'manual';
-  const showRefreshButton = activeRetailer && activeRetailer.scrape_source !== 'manual' && selectedRetailer !== 'all';
 
   const headerTitle = selectedRetailer === 'all'
     ? 'All Retailer Deals'
@@ -114,14 +109,6 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
           <div>
             <h1>{headerTitle}</h1>
             <p>{headerSubtitle}</p>
-          </div>
-          <div className="header-actions">
-            {showImportButton && (
-              <button className="import-button" onClick={() => setShowImportModal(true)}>
-                Import Deals
-              </button>
-            )}
-            {showRefreshButton && <RefreshButton retailer={selectedRetailer} />}
           </div>
         </div>
         {flyerDates && selectedRetailer === 'costco' && (
@@ -241,15 +228,6 @@ export default function DealsPageClient({ deals, retailers, retailerDates, flyer
         lastUpdated={lastUpdated}
         showRetailer={selectedRetailer === 'all'}
       />
-
-      {showImportModal && activeRetailer && (
-        <ImportModal
-          retailerSlug={activeRetailer.slug}
-          retailerName={activeRetailer.name}
-          onClose={() => setShowImportModal(false)}
-          onSuccess={() => window.location.reload()}
-        />
-      )}
     </>
   );
 }

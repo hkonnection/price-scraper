@@ -110,7 +110,7 @@ export default function DealsTable({ deals, lastUpdated, showRetailer = false, s
   if (deals.length === 0) {
     return (
       <div className="empty-state">
-        <p>No deals found. Run the scraper or import deals to populate data.</p>
+        <p>No deals found.</p>
       </div>
     );
   }
