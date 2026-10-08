@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useMemo } from 'react';
+import { formatPublicationDate } from '../publication';
 
 interface Deal {
   id: number;
@@ -16,6 +17,8 @@ interface Deal {
   image_url: string | null;
   product_url: string | null;
   scraped_at: string;
+  published_at: string | null;
+  scrape_id: number | null;
   in_stock: number;
   retailer_slug: string;
   retailer_name: string;
@@ -23,45 +26,11 @@ interface Deal {
 
 interface DealsTableProps {
   deals: Deal[];
-  lastUpdated: string | null;
   showRetailer?: boolean;
 }
 
 type SortKey = 'product_name' | 'regular_price' | 'sale_price' | 'savings_amount' | 'savings_percent' | 'category' | 'retailer_name';
 type SortDirection = 'asc' | 'desc';
-
-/**
- * Formats a date string to "Jan 24, 2026, 9:18:52 PM" format.
- */
-function formatDate(dateString: string): string {
-  const date = new Date(dateString);
-  return date.toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  }) + ', ' + date.toLocaleTimeString('en-US');
-}
-
-/**
- * Formats a date string to short format "Jan 24" or "Jan 24, 2025" if not current year.
- */
-function formatShortDate(dateString: string): string {
-  const date = new Date(dateString);
-  const currentYear = new Date().getFullYear();
-  const dateYear = date.getFullYear();
-
-  if (dateYear === currentYear) {
-    return date.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-    });
-  }
-  return date.toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  });
-}
 
 /**
  * Returns a CSS class for the retailer badge based on slug.
@@ -81,8 +50,10 @@ function getRetailerBadgeClass(slug: string): string {
  * Sortable deals table component.
  * Displays product deals with clickable column headers for sorting.
  * Optionally shows retailer column when viewing all retailers.
+ * @param props - Selected saved rows and whether to show retailer names.
+ * @returns Sortable table with UTC publication or legacy observation dates.
  */
-export default function DealsTable({ deals, lastUpdated, showRetailer = false }: DealsTableProps) {
+export default function DealsTable({ deals, showRetailer = false }: DealsTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>('savings_percent');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [modalImage, setModalImage] = useState<{ url: string; name: string } | null>(null);
@@ -138,18 +109,13 @@ export default function DealsTable({ deals, lastUpdated, showRetailer = false }:
   if (deals.length === 0) {
     return (
       <div className="empty-state">
-        <p>No deals found. Run the scraper or import deals to populate data.</p>
+        <p>No deals found for these filters. Try another retailer or filter.</p>
       </div>
     );
   }
 
   return (
     <>
-      {lastUpdated && (
-        <p className="last-updated">
-          Last updated: {formatDate(lastUpdated)}
-        </p>
-      )}
       <p className="scroll-hint">Swipe to see more</p>
       <div className="deals-table-wrapper">
         <table className="deals-table">
@@ -163,11 +129,7 @@ export default function DealsTable({ deals, lastUpdated, showRetailer = false }:
                   Retailer
                 </th>
               )}
-              {showRetailer && (
-                <th style={{ whiteSpace: 'nowrap' }}>
-                  Updated
-                </th>
-              )}
+              <th style={{ whiteSpace: 'nowrap' }}>Publication / observation (UTC)</th>
               <th
                 className={getSortClass('product_name')}
                 onClick={() => handleSort('product_name')}
@@ -220,11 +182,10 @@ export default function DealsTable({ deals, lastUpdated, showRetailer = false }:
                     </span>
                   </td>
                 )}
-                {showRetailer && (
-                  <td className="updated-cell">
-                    {formatShortDate(deal.scraped_at)}
-                  </td>
-                )}
+                <td className="updated-cell">
+                  {deal.scrape_id === null ? 'Observed (legacy): ' : 'Last published: '}
+                  {formatPublicationDate(deal.scrape_id === null ? deal.scraped_at : deal.published_at)}
+                </td>
                 <td>
                   <div className="product-cell">
                     {deal.image_url && (
