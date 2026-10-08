@@ -10,6 +10,8 @@
 import { chromium } from 'playwright';
 
 const BASE_URL = 'https://shop.lululemon.com';
+// Initial-section anchor, rounded down: no cumulative widening on later pages.
+const MAX_SECTION_DRIFT_RATIO = 0.03;
 
 const WMTM_SECTIONS = [
   {
@@ -29,6 +31,7 @@ const WMTM_SECTIONS = [
 /**
  * Scrapes all WMTM deals from lululemon Canada.
  * Launches Chrome with normal browser defaults and navigates each WMTM page.
+ * Set LULULEMON_VISIBLE_CHROME=1 for visible Chrome; all other values stay headless.
  * Does not mask fingerprints or solve retailer challenges.
  *
  * @returns {Promise<{deals: Array<object>, totalProducts: number, sections: Array<object>}>}
@@ -37,7 +40,7 @@ const WMTM_SECTIONS = [
 export async function scrapeLululemon() {
   console.log('Launching browser...');
   const browser = await chromium.launch({
-    headless: true,
+    headless: process.env.LULULEMON_VISIBLE_CHROME !== '1',
     channel: 'chrome',
   });
   const context = await browser.newContext();
@@ -95,8 +98,11 @@ export async function scrapeLululemon() {
 /**
  * Scrapes all pages for a single WMTM section using ordinary navigation.
  * Reads page 1 embedded catalog metadata, then visits each remaining page.
- * Checks stable raw pagination and unique product identities before sale filtering.
- * Rejects incomplete or overlapping pagination instead of publishing a partial section.
+ * Anchors count drift and cumulative cross-page overlap to floor(initial total * 3%).
+ * Current pages may move their final page within that count budget. Partial overlap
+ * requires observed count movement and raw progress; first identity wins before filtering.
+ * Legacy pages have no measurable total, so retain strict pagination/repeat checks.
+ * Rejects malformed, truncated or repeated pages; moving data is not an atomic snapshot.
  *
  * @param {import('playwright').Page} page - Playwright page with active session
  * @param {{name: string, path: string}} section - WMTM section config
@@ -108,33 +114,59 @@ async function scrapeSectionPages(page, section) {
   const seenProducts = new Set();
   const firstPageData = await fetchPageData(page, section.path, 1);
   const { products, totalProductPages } = firstPageData;
+  const driftBudget = firstPageData.catalogType === 'current'
+    ? Math.floor(firstPageData.totalCount * MAX_SECTION_DRIFT_RATIO) : 0;
+  let finalPage = totalProductPages;
+  let observedDrift = false;
+  let totalOverlap = 0;
   console.log(`  ${section.name}: ${totalProductPages} pages to scrape`);
 
-  for (let pageNum = 1; pageNum <= totalProductPages; pageNum++) {
+  for (let pageNum = 1; pageNum <= finalPage; pageNum++) {
     const pageData = pageNum === 1 ? firstPageData : await fetchPageData(page, section.path, pageNum);
-    if (pageData.catalogType !== firstPageData.catalogType || pageData.totalProductPages !== totalProductPages ||
-        pageData.totalCount !== firstPageData.totalCount || pageData.limit !== firstPageData.limit) {
+    if (pageData.catalogType !== firstPageData.catalogType || pageData.limit !== firstPageData.limit ||
+        (pageData.catalogType === 'current'
+          ? Math.abs(pageData.totalCount - firstPageData.totalCount) > driftBudget
+          : pageData.totalProductPages !== totalProductPages)) {
       throw new Error(`Lululemon ${section.path} page ${pageNum}: Inconsistent catalog pagination`);
+    }
+    // fetchPageData validates raw size against THIS page's offset/limit/count.
+    // Following its validated final page covers bounded growth and shrink.
+    finalPage = pageData.totalProductPages;
+    if (pageData.catalogType === 'current' && pageData.totalCount !== firstPageData.totalCount) {
+      observedDrift = true;
     }
     // Legacy pages expose no totalCount/limit; require full intermediate pages
     // and allow a nonempty final page no larger than the first page.
     if (pageData.catalogType === 'legacy' && (pageData.products.length > products.length ||
-        (pageNum < totalProductPages && pageData.products.length !== products.length))) {
+        (pageNum < finalPage && pageData.products.length !== products.length))) {
       throw new Error(`Lululemon ${section.path} page ${pageNum}: Inconsistent category product count`);
     }
     // Raw identities, not filtered deals, detect repeats even when offsets or
-    // prices change. Scope this set to one section, not overlapping sections.
+    // prices change. Scope these sets to one section, not overlapping sections.
+    const pageIdentities = new Set();
+    const newProducts = [];
+    let overlap = 0;
     for (const product of pageData.products) {
       const id = pageData.catalogType === 'current' ? product?.id : product?.productId;
       if (typeof id !== 'string' || !id.trim()) {
         throw new Error(`Lululemon ${section.path} page ${pageNum}: Missing catalog product identity`);
       }
-      if (seenProducts.has(id)) {
+      if (pageIdentities.has(id)) {
         throw new Error(`Lululemon ${section.path} page ${pageNum}: Repeated catalog product ${id}`);
       }
-      seenProducts.add(id);
+      pageIdentities.add(id);
+      if (seenProducts.has(id)) overlap++;
+      else newProducts.push(product);
     }
-    const pageDeals = pageData.products
+    if (newProducts.length === 0) {
+      throw new Error(`Lululemon ${section.path} page ${pageNum}: Repeated catalog products; No pagination progress`);
+    }
+    if (overlap > 0 && (!observedDrift || totalOverlap + overlap > driftBudget)) {
+      throw new Error(`Lululemon ${section.path} page ${pageNum}: Repeated catalog products exceed inventory drift allowance`);
+    }
+    totalOverlap += overlap;
+    for (const id of pageIdentities) seenProducts.add(id);
+    const pageDeals = newProducts
       .map((p) => transformProduct(p, section.name))
       .filter(Boolean);
     sectionDeals.push(...pageDeals);
