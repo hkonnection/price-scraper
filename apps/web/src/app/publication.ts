@@ -48,13 +48,32 @@ export function normalizePublicationDate(value: unknown): string | null {
 }
 
 /**
- * Format a date identically on the server and browser, with an explicit UTC label.
- * @param value - Publication or legacy observation timestamp.
- * @returns Year, date and time in UTC, or Unknown.
+ * Format a stored UTC date using Vancouver's native rules and B.C.'s public label.
+ * @param value - Publication timestamp; missing or invalid values never become now.
+ * @returns Date and time with PCT, historical PST/PDT, or Unknown.
  */
 export function formatPublicationDate(value: unknown): string {
   const normalized = normalizePublicationDate(value);
-  return normalized ? normalized.slice(0, 19).replace('T', ' ') + ' UTC' : 'Unknown';
+  if (!normalized) return 'Unknown';
+  const date = new Date(normalized);
+  // Pacific Time became B.C.'s standard on March 9, 2026, at local midnight.
+  // This boundary changes only the name; native IANA data calculates the clock.
+  // https://news.gov.bc.ca/releases/2026CITZ0009-001073
+  const zone = date.getTime() >= Date.parse('2026-03-09T07:00:00Z') ? 'PCT'
+    : new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Vancouver', timeZoneName: 'short',
+    }).formatToParts(date).find(part => part.type === 'timeZoneName')!.value;
+  const clock = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Vancouver',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  }).format(date);
+  return `${clock} ${zone}`;
 }
 
 /**
