@@ -1,0 +1,88 @@
+name: Publish saved Lululemon deals
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag in this repository containing the saved JSON assets'
+        required: true
+        type: string
+      asset_names:
+        description: 'Exact JSON asset names, one per line. Publish all intended sections together; never both raw and cleaned copies.'
+        required: true
+        type: string
+      dry_run:
+        description: 'Validate and count only; do not replace the retailer snapshot'
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# Serializes this workflow only. Other Lululemon writers must be idle before publishing.
+concurrency:
+  group: publish-lululemon-saved
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download exact saved JSON assets
+        id: download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ASSET_NAMES: ${{ inputs.asset_names }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || { echo 'Invalid release tag' >&2; exit 1; }
+          [[ "$DRY_RUN" == 'true' || "$DRY_RUN" == 'false' ]] || { echo 'Invalid dry_run value' >&2; exit 1; }
+          assets=()
+          while IFS= read -r asset; do
+            [[ "$asset" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.json$ ]] || { echo 'Invalid exact JSON asset name' >&2; exit 1; }
+            if [[ ${#assets[@]} -gt 0 ]]; then
+              for previous in "${assets[@]}"; do
+                [[ "$previous" != "$asset" ]] || { echo 'Duplicate asset name' >&2; exit 1; }
+              done
+            fi
+            assets+=("$asset")
+          done <<< "$ASSET_NAMES"
+          directory=$(mktemp -d "$RUNNER_TEMP/lulu-saved-XXXXXX")
+          for asset in "${assets[@]}"; do
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$directory"
+          done
+          printf 'directory=%s\n' "$directory" >> "$GITHUB_OUTPUT"
+
+      - name: Validate and publish saved deals
+        shell: bash
+        env:
+          ASSET_NAMES: ${{ inputs.asset_names }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          DIRECTORY: ${{ steps.download.outputs.directory }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
+        run: |
+          set -euo pipefail
+          files=()
+          while IFS= read -r asset; do
+            files+=("$DIRECTORY/$asset")
+          done <<< "$ASSET_NAMES"
+          mode=--dry-run
+          if [[ "$DRY_RUN" == 'false' ]]; then
+            mode=--publish
+          elif [[ "$DRY_RUN" != 'true' ]]; then
+            echo 'Invalid dry_run value' >&2; exit 1
+          fi
+          node scraper/local/publish-lululemon.mjs "$mode" -- "${files[@]}"
