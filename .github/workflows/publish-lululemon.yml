@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       dry_run:
-        description: 'Validate and count only; do not replace the retailer snapshot'
+        description: 'Validate saved inputs and read the live count only; do not replace the retailer snapshot'
         required: true
         type: boolean
         default: true
@@ -65,6 +65,7 @@ jobs:
           printf 'directory=%s\n' "$directory" >> "$GITHUB_OUTPUT"
 
       - name: Validate and publish saved deals
+        id: submit
         shell: bash
         env:
           ASSET_NAMES: ${{ inputs.asset_names }}
@@ -86,3 +87,15 @@ jobs:
             echo 'Invalid dry_run value' >&2; exit 1
           fi
           node scraper/local/publish-lululemon.mjs "$mode" -- "${files[@]}"
+
+      # Runs only after successful input processing/publication. This query is read-only,
+      # including in dry-run; equality is required only after a real publication.
+      - name: Verify persisted Lululemon row count
+        shell: bash
+        env:
+          SUBMITTED_TOTAL: ${{ steps.submit.outputs.submitted_total }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
+        run: node scraper/local/verify-lululemon-count.mjs
