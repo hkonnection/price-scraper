@@ -98,6 +98,27 @@ test('combines raw envelope and cleaned arrays once, preserves overlap and per-f
   } finally { f.cleanup(); }
 });
 
+test('successful saved processing transfers its exact total only after success', () => {
+  const f = fixture();
+  try {
+    const a = input(f, 'first.json', [deal(), deal()]);
+    const b = input(f, 'second.json', [deal()]);
+    const output = path.join(f.dir, 'submitted-output');
+    for (const mode of ['--dry-run', '--publish']) {
+      fs.writeFileSync(output, 'existing=kept\n');
+      const result = run(f, [mode, '--', a, b], { GITHUB_OUTPUT: output });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(fs.readFileSync(output, 'utf8'), 'existing=kept\nsubmitted_total=3\n');
+    }
+    for (const args of [ ['--publish', a, input(f, 'bad.json', [])], ['--publish', a] ]) {
+      fs.writeFileSync(output, 'existing=kept\n');
+      const result = run(f, args, { GITHUB_OUTPUT: output, STUB_FAIL: '1' });
+      assert.equal(result.status, 1);
+      assert.equal(fs.readFileSync(output, 'utf8'), 'existing=kept\n');
+    }
+  } finally { f.cleanup(); }
+});
+
 test('dry-run and default mode use real cleaner but require no credentials or network', () => {
   const f = fixture();
   try {

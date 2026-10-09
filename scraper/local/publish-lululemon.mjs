@@ -85,7 +85,7 @@ export function loadDeals(file) {
   return alreadyCleaned ? rows : clean(rows);
 }
 
-/** Validate all files first, then make at most one publication. No publisher import in dry-run. @param {string[]} argv Arguments. @returns {Promise<void>} Completion. @throws {Error} For validation or publication failure, without remote error bodies. */
+/** Validate all files first, then make at most one publication. No publisher import in dry-run. @param {string[]} argv Arguments. @returns {Promise<number>} Successfully submitted combined row count. @throws {Error} For validation or publication failure, without remote error bodies. */
 export async function main(argv) {
   const { files, publish } = parseArgs(argv);
   const seen = new Set();
@@ -100,16 +100,20 @@ export async function main(argv) {
   for (const input of inputs) console.log(`Submitted ${JSON.stringify(input.file)}: ${input.deals.length}`);
   console.log(`Submitted total: ${deals.length}`);
   console.log('These are submitted counts, not independently verified persisted section counts.');
-  if (!publish) { console.log('Dry run complete: no D1 call.'); return; }
+  if (!publish) { console.log('Dry run complete: no D1 call.'); return deals.length; }
   try {
     const { pushToD1 } = await import('../src/db/d1.js');
     await pushToD1(deals, 'lululemon');
+    return deals.length;
   } catch {
     throw new Error('Publication failed; the snapshot may already have been completed. Verify remote state before retrying.');
   }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { await main(process.argv.slice(2)); }
+  try {
+    const total = await main(process.argv.slice(2));
+    if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `submitted_total=${total}\n`);
+  }
   catch (error) { console.error(`Error: ${error.message}`); process.exitCode = 1; }
 }
