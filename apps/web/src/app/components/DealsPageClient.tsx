@@ -67,7 +67,7 @@ interface DealsPageClientProps extends Paging {
  * @param props - Rows, full matching totals, options, and validated page state.
  * @returns The existing deals layout with bounded URL-driven browsing.
  */
-export default function DealsPageClient({ deals, retailers, retailerDates, retailerPaused, evaluatedAt, hasLegacyRows, flyerDates, total, avgSavings, topSaving,
+export default function DealsPageClient({ deals, retailers, retailerDates, flyerDates, total, avgSavings, topSaving,
   categories, promoTypes, retailerSlug: selectedRetailer, category: selectedCategory, promo: selectedPromoType,
   sort, direction, size: pageSize, offset, publication, publicationReset }: DealsPageClientProps) {
   const router = useRouter();
@@ -118,14 +118,6 @@ export default function DealsPageClient({ deals, retailers, retailerDates, retai
           </p>
         )}
       </header>
-
-      <PublicationSummary
-        retailers={selectedRetailer === 'all' ? retailers : retailers.filter(r => r.slug === selectedRetailer)}
-        retailerDates={retailerDates}
-        retailerPaused={retailerPaused}
-        evaluatedAt={evaluatedAt}
-        hasLegacyRows={hasLegacyRows}
-      />
 
       <div className="filter-bar">
         <div className="filter-group">
@@ -227,6 +219,8 @@ export default function DealsPageClient({ deals, retailers, retailerDates, retai
           </button>
         </div>
       </div>
+
+      <PublicationSummary retailer={activeRetailer} retailerDates={retailerDates} />
 
       <DealsTable
         deals={deals}

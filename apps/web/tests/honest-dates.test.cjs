@@ -48,12 +48,10 @@ test('selected publication, failed attempts, legacy rows and mixed store ages re
     assert.equal(result.deals.find(d => d.product_code === 'legacy').published_at, null);
     assert.equal(result.retailerPaused.indigo, true);
     const html = await pageHTML(facade);
-    assert.match(html, /Last published:/);
+    assert.doesNotMatch(html, /Last published:|Last updated:/);
     assert.match(html, /Paged results across retailers/);
     assert.doesNotMatch(html, /Limited selection|2,000 loaded rows/);
-    assert.match(html, /Collection paused/);
-    assert.doesNotMatch(html, /Observed \(legacy\):/);
-    assert.match(html, /Actions run history/);
+    assert.doesNotMatch(html, /Collection paused|Observed \(legacy\):|Actions run history/);
     assert.doesNotMatch(html, /Current deals|Last updated:/);
     assert.deepEqual(db.prepare('SELECT * FROM deals ORDER BY id').all(), before);
   } finally { db.close(); }
@@ -67,7 +65,7 @@ test('empty results and unknown retailer are not database errors', async () => {
     assert.equal(result.deals.length, 0);
     const html = await pageHTML(facade, 'costco');
     assert.match(html, /No deals found/);
-    assert.match(html, /Last published: Unknown/);
+    assert.match(html, /Last updated: Unknown/);
     assert.doesNotMatch(html, /Deals could not be loaded/);
   } finally { db.close(); }
 });
@@ -88,26 +86,26 @@ test('late database failures cannot leave partial fresh-looking results', async 
   }
 });
 
-test('invalid and missing completion dates keep selected old rows with unknown publication age', async () => {
+test('invalid and missing completion dates keep selected old rows with unknown update time', async () => {
   for (const value of [null, 'bad', '2026-02-30T12:00:00Z']) {
     const { db, facade } = fixture();
     try {
       db.prepare('UPDATE scrape_history SET completed_at=? WHERE id=101').run(value);
       const html = await pageHTML(facade, 'sportchek');
       assert.match(html, /Synthetic selected old price/);
-      assert.match(html, /Last published: Unknown/);
-      assert.match(html, /Age unknown/);
-      assert.doesNotMatch(html, /Synthetic failed rows|Last updated:/);
+      assert.match(html, /Last updated: Unknown/);
+      assert.doesNotMatch(html, /Synthetic failed rows|Age unknown|Invalid Date|UTC/);
     } finally { db.close(); }
   }
 });
 
-test('database-paused active sources retain rows and show a paused warning', async () => {
+test('database-paused active sources retain rows and their completed update time', async () => {
   const { db, facade } = fixture();
   try {
     db.exec('UPDATE scrape_sources SET is_active=0 WHERE id=14');
     const html = await pageHTML(facade, 'sportchek');
-    assert.match(html, /Collection paused/);
+    assert.match(html, /Last updated: Oct 1, 2026, 5:00:00 AM PCT/);
+    assert.doesNotMatch(html, /Collection paused/);
     assert.match(html, /Synthetic selected old price/);
     assert.doesNotMatch(html, /Observed \(legacy\):/);
   } finally { db.close(); }
@@ -119,8 +117,46 @@ test('missing, invalid, impossible and ambiguous dates never become now', () => 
     assert.equal(normalizePublicationDate(value), null, String(value));
     assert.equal(formatPublicationDate(value), 'Unknown', String(value));
   }
-  assert.equal(formatPublicationDate('2026-10-08 12:00:00'), '2026-10-08 12:00:00 UTC');
-  assert.equal(formatPublicationDate('2026-10-08T05:00:00-07:00'), '2026-10-08 12:00:00 UTC');
+  assert.equal(formatPublicationDate('2026-10-08 12:00:00'), 'Oct 8, 2026, 5:00:00 AM PCT');
+  assert.equal(formatPublicationDate('2026-10-08T05:00:00-07:00'), 'Oct 8, 2026, 5:00:00 AM PCT');
+});
+
+test('Vancouver formatter preserves historical rules and permanent Pacific Time without November fallback', () => {
+  const { formatPublicationDate } = appLoader()('publication.ts');
+  const cases = [
+    ['2026-07-01T12:00:00Z', 'Jul 1, 2026, 5:00:00 AM PCT'],
+    ['2026-10-08 21:51:12', 'Oct 8, 2026, 2:51:12 PM PCT'],
+    ['2026-01-01T12:00:00Z', 'Jan 1, 2026, 4:00:00 AM PST'],
+    ['2026-11-01T08:30:00Z', 'Nov 1, 2026, 1:30:00 AM PCT'],
+    ['2026-11-01T09:30:00Z', 'Nov 1, 2026, 2:30:00 AM PCT'],
+    ['2026-11-01T08:59:59Z', 'Nov 1, 2026, 1:59:59 AM PCT'],
+    ['2026-11-01T09:00:00Z', 'Nov 1, 2026, 2:00:00 AM PCT'],
+    ['2027-01-01T12:00:00Z', 'Jan 1, 2027, 5:00:00 AM PCT'],
+    ['2026-03-08T09:59:59Z', 'Mar 8, 2026, 1:59:59 AM PST'],
+    ['2026-03-08T10:00:00Z', 'Mar 8, 2026, 3:00:00 AM PDT'],
+    ['2026-03-09T06:59:59Z', 'Mar 8, 2026, 11:59:59 PM PDT'],
+    ['2026-03-09T07:00:00Z', 'Mar 9, 2026, 12:00:00 AM PCT'],
+  ];
+  for (const [input, expected] of cases) assert.equal(formatPublicationDate(input), expected);
+});
+
+test('selection without stored completion never borrows another retailer or the observation time', async () => {
+  const { db, facade } = fixture();
+  try {
+    db.exec("UPDATE scrape_history SET completed_at=NULL WHERE id=101");
+    const html = await pageHTML(facade, 'sportchek');
+    assert.match(html, /Last updated: Unknown/);
+    assert.doesNotMatch(html, /Last updated: Jul|Last updated: Jun|Invalid Date|UTC/);
+    const unknown = await pageHTML(facade, 'not-a-retailer');
+    assert.doesNotMatch(unknown, /Last updated:/);
+  } finally { db.close(); }
+});
+
+test('the application runtime pin selects the verified refreshed native timezone rules', () => {
+  assert.equal(fs.readFileSync(path.resolve(__dirname, '../../../.node-version'), 'utf8').trim(), '26.11.1');
+  const formatter = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Vancouver', hour: '2-digit', hourCycle: 'h23' });
+  assert.equal(formatter.format(new Date('2026-11-01T09:30:00Z')), '02');
+  assert.equal(formatter.format(new Date('2027-01-01T12:00:00Z')), '05');
 });
 
 test('cadence age limits reject stale and future dates at exact boundaries', () => {
@@ -138,16 +174,18 @@ test('server zones produce identical dates and age labels', () => {
   const results = ['UTC','America/Los_Angeles','Asia/Tokyo'].map(TZ => spawnSync(process.execPath, ['-e',script], { env: { ...process.env, TZ }, encoding: 'utf8' }));
   for (const result of results) assert.equal(result.status, 0, result.stderr);
   assert.equal(new Set(results.map(r => r.stdout)).size, 1);
+  assert.match(results[0].stdout, /^Oct 7, 2026, 5:15:00 PM PCT/);
 });
 
-test('run history distinguishes hosted and local attempts without promising all failure logs', async () => {
+test('single short update line is right-aligned immediately above the table without the removed blurb', async () => {
   const { db, facade } = fixture();
   try {
-    const html = await pageHTML(facade);
-    assert.doesNotMatch(html, /only visible in Actions/);
-    assert.match(html, /hosted attempts only/);
-    assert.match(html, /local attempts are not included/);
-    assert.match(html, /before database writing are not recorded in database history/);
+    const html = await pageHTML(facade, 'sportchek');
+    assert.equal((html.match(/Last updated:/g) || []).length, 1);
+    assert.match(html, /<p class="last-updated">Last updated: Oct 1, 2026, 5:00:00 AM PCT<\/p><p class="scroll-hint">Swipe to see more<\/p><div class="deals-table-wrapper">/);
+    assert.ok(html.indexOf('pagination-controls') < html.indexOf('Last updated:'));
+    assert.match(fs.readFileSync(path.resolve(__dirname, '../src/app/globals.css'), 'utf8'), /\.last-updated\s*\{\s*text-align: right;/);
+    assert.doesNotMatch(html, /Last published|Stale means|Age limit|Saved prices and availability|Actions run history|hosted attempts only|local attempts|Legacy rows have no verified publication date/);
   } finally { db.close(); }
 });
 
