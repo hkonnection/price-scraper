@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { parseArgs, runDaily } from './lululemon-daily.mjs';
 import { loadDeals, main as savedMain } from './publish-lululemon.mjs';
 import { SECTIONS } from './lululemon-grid.mjs';
@@ -30,6 +32,33 @@ test('the CLI entry uses the same locally exercised argument vector and complete
   const result = await main(['--output-dir', f.outputDir, '--publish'], f.runtime);
   assert.equal(result.payload.totalProducts, 1);
   assert.equal(f.calls.filter(c => c[0] === 'workflow').length, 1);
+});
+
+/** Observe the real GitHub adapter at its subprocess boundary without remote execution. */
+test('GitHub subprocess appends user-local bin after the exact fixed system PATH', async t => {
+  const f = fixture(); delete f.runtime.github;
+  const subprocesses = [];
+  const spawn = t.mock.method(childProcess, 'spawnSync', (command, args, options) => {
+    subprocesses.push({ command, args, options });
+    return { status: 0 };
+  });
+  syncBuiltinESMExports();
+  try {
+    await runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime);
+    assert.equal(subprocesses.length, 3);
+    assert.deepEqual(subprocesses.map(call => call.args.slice(0, 2)), [['release', 'create'], ['release', 'upload'], ['workflow', 'run']]);
+    const prefix = '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+    for (const { command, args, options } of subprocesses) {
+      assert.equal(command, 'gh-axi');
+      assert.deepEqual(args.slice(-2), ['--repo', 'hkonnection/price-scraper']);
+      assert.equal(options.env.PATH.slice(0, prefix.length + 1), prefix + ':');
+      assert.equal(options.env.PATH.split(':').at(-1), path.join(os.homedir(), '.local', 'bin'));
+      assert.deepEqual(options, { encoding: 'utf8', stdio: 'pipe', env: { HOME: os.homedir(), PATH: prefix + ':' + path.join(os.homedir(), '.local', 'bin') }, timeout: 120000 });
+    }
+  } finally {
+    spawn.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test('daily argument interface refuses unsafe/ambiguous modes and requires private absolute output', () => {

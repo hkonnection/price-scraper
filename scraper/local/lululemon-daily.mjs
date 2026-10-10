@@ -72,7 +72,7 @@ function save(file, data) { fs.writeFileSync(file, typeof data === 'string' ? da
 /** Execute the existing GitHub CLI authentication context without shell evaluation or secret environment inheritance. @param {string[]} args CLI arguments. @returns {object} Exit status. */
 function github(args) {
   return spawnSync('gh-axi', [...args, '--repo', 'hkonnection/price-scraper'], { encoding: 'utf8', stdio: 'pipe',
-    env: { HOME: os.homedir(), PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin' }, timeout: 120000 });
+    env: { HOME: os.homedir(), PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:' + path.join(os.homedir(), '.local', 'bin') }, timeout: 120000 });
 }
 
 /** Capture a complete set under an exclusive local lock, validate with the saved publisher, then upload/dispatch exactly once. @param {object} options Validated options. @param {object} overrides Offline dependency injection, not CLI flags. @returns {Promise<object>} Saved set and dispatch details. @throws {Error} On any incomplete capture, unsafe state or uncertain remote operation; never retries. */
