@@ -34,10 +34,11 @@ async function getSourceId(retailerId) {
  * Creates a scrape history record.
  * @param {number} sourceId - Source ID
  * @param {string|null} flyerDates - Flyer date range (e.g., "January 19-25, 2026")
+ * @param {string|null} capturedAt - Validated saved-file capture time, otherwise wall time
  * @returns {Promise<number>} Scrape history ID
  */
-async function createScrapeHistory(sourceId, flyerDates = null) {
-  const startedAt = new Date().toISOString();
+async function createScrapeHistory(sourceId, flyerDates = null, capturedAt = null) {
+  const startedAt = capturedAt ?? new Date().toISOString();
   const flyerDatesPart = flyerDates ? `'${escapeSql(flyerDates)}'` : 'NULL';
   await queryD1(`
     INSERT INTO scrape_history (source_id, started_at, status, flyer_dates)
@@ -55,9 +56,11 @@ async function createScrapeHistory(sourceId, flyerDates = null) {
  * @param {string} status - Status ('completed' or 'failed')
  * @param {number} dealsCount - Number of deals scraped
  * @param {string} errorMessage - Error message if failed
+ * @param {string|null} capturedAt - Validated saved-file capture time, otherwise wall time
+ * @returns {Promise<void>} Completion update
  */
-async function updateScrapeHistory(scrapeId, status, dealsCount = 0, errorMessage = null) {
-  const completedAt = new Date().toISOString();
+async function updateScrapeHistory(scrapeId, status, dealsCount = 0, errorMessage = null, capturedAt = null) {
+  const completedAt = capturedAt ?? new Date().toISOString();
   const errorPart = errorMessage ? `error_message = '${escapeSql(errorMessage)}',` : '';
   await queryD1(`
     UPDATE scrape_history
@@ -77,12 +80,22 @@ async function updateScrapeHistory(scrapeId, status, dealsCount = 0, errorMessag
  * @param {Array<Deal>} deals - Array of deal objects
  * @param {string} retailerSlug - Retailer slug (e.g., 'costco')
  * @param {string|null} flyerDates - Flyer date range (e.g., "January 19-25, 2026")
+ * @param {string|null} capturedAt - Optional canonical UTC saved-file capture timestamp
  * @returns {Promise<void>} Resolves after publication and cleanup.
- * @throws {Error} For empty snapshots or persistence/cleanup failures.
+ * @throws {Error} For empty snapshots, invalid capture bounds or persistence/cleanup failures.
  */
-export async function pushToD1(deals, retailerSlug = 'costco', flyerDates = null) {
+export async function pushToD1(deals, retailerSlug = 'costco', flyerDates = null, capturedAt = null) {
   if (!Array.isArray(deals) || deals.length === 0) {
     throw new Error('Cannot publish an empty deal snapshot; existing publication was not changed.');
+  }
+  if (capturedAt !== null) {
+    /** Check canonical UTC timestamps before SQL interpolation. @param {*} value Timestamp. @returns {boolean} Strict validity. */
+    const canonical = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+    if (!canonical(capturedAt) || Date.parse(capturedAt) > Date.now()) throw new Error('Invalid captured_at: expected a non-future canonical UTC ISO timestamp.');
+    for (const deal of deals) {
+      const rowTime = typeof deal?.scraped_at === 'string' && deal.scraped_at.length === 20 ? deal.scraped_at.replace('Z', '.000Z') : deal?.scraped_at;
+      if (!canonical(rowTime) || Date.parse(rowTime) > Date.parse(capturedAt)) throw new Error('Invalid captured_at: missing/invalid source scraped_at or capture precedes a source row.');
+    }
   }
   // Get retailer ID
   const retailerId = await getRetailerId(retailerSlug);
@@ -90,7 +103,7 @@ export async function pushToD1(deals, retailerSlug = 'costco', flyerDates = null
 
   // Get source ID and create scrape history record
   const sourceId = await getSourceId(retailerId);
-  const scrapeId = await createScrapeHistory(sourceId || 1, flyerDates);
+  const scrapeId = await createScrapeHistory(sourceId || 1, flyerDates, capturedAt);
   console.log(`Created scrape history record: ${scrapeId}`);
 
   let published = false;
@@ -123,7 +136,7 @@ export async function pushToD1(deals, retailerSlug = 'costco', flyerDates = null
     await queryD1(insertStatements);
 
     // Mark scrape as completed
-    await updateScrapeHistory(scrapeId, 'completed', deals.length);
+    await updateScrapeHistory(scrapeId, 'completed', deals.length, null, capturedAt);
     published = true;
     // Cleanup is last: readers can select the completed snapshot even if this fails.
     // Never delete rows belonging to a later-created publication.
@@ -131,7 +144,7 @@ export async function pushToD1(deals, retailerSlug = 'costco', flyerDates = null
     console.log(`Successfully pushed ${deals.length} deals for ${retailerSlug} (scrape_id: ${scrapeId})`);
   } catch (error) {
     // A cleanup failure does not invalidate a snapshot already made visible.
-    if (!published) await updateScrapeHistory(scrapeId, 'failed', 0, error.message);
+    if (!published) await updateScrapeHistory(scrapeId, 'failed', 0, error.message, capturedAt);
     throw error;
   }
 }

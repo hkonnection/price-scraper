@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /** Publish explicit saved Lululemon JSON inputs as one retailer snapshot; never collect.
- * Usage: node scraper/local/publish-lululemon.mjs [--dry-run | --publish] -- file.json [...]
+ * Usage: node scraper/local/publish-lululemon.mjs [--dry-run | --publish] [--captured-at UTC_ISO] -- file.json [...]
  * Defaults to dry-run. Files may be raw {deals,totalProducts,sections} envelopes or arrays.
  * Submit all intended sections together; publication replaces the whole retailer snapshot.
  * Serialize with every other Lululemon writer. Counts are submitted, not section receipts.
@@ -10,11 +10,18 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { clean } from '../src/cleaners/lululemon.js';
 
-/** Parse explicit filenames with safe default dry-run. @param {string[]} argv Arguments. @returns {object} Files and mode. @throws {Error} On invalid flags, missing files or duplicate paths. */
+/** Parse explicit filenames, optional capture time and safe default dry-run. @param {string[]} argv Arguments. @returns {object} Files, capture time and mode. @throws {Error} On invalid flags, missing values/files or duplicate paths. */
 function parseArgs(argv) {
-  let publish = false, mode = null, positional = false;
+  let publish = false, mode = null, positional = false, capturedAt;
   const files = [];
-  for (const arg of argv) {
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index];
+    if (!positional && arg === '--captured-at') {
+      if (capturedAt !== undefined) throw new Error('Duplicate captured_at argument.');
+      capturedAt = argv[++index];
+      if (capturedAt === undefined || capturedAt.startsWith('--')) throw new Error('Missing captured_at value.');
+      continue;
+    }
     if (!positional && arg === '--') { positional = true; continue; }
     if (!positional && ['--dry-run', '--publish'].includes(arg)) {
       if (mode) throw new Error('Choose one mode: --dry-run or --publish.');
@@ -25,7 +32,7 @@ function parseArgs(argv) {
   }
   if (!files.length) throw new Error('At least one explicit saved JSON file is required.');
   if (new Set(files.map(file => path.resolve(file))).size !== files.length) throw new Error('Duplicate input file path. Select each capture only once.');
-  return { files, publish };
+  return { files, publish, capturedAt };
 }
 
 /** Test a strict ISO date or timestamp, excluding SQL text and impossible calendar dates. @param {*} value Input. @returns {boolean} Valid date. */
@@ -85,9 +92,18 @@ export function loadDeals(file) {
   return alreadyCleaned ? rows : clean(rows);
 }
 
-/** Validate all files first, then make at most one publication. No publisher import in dry-run. @param {string[]} argv Arguments. @returns {Promise<number>} Successfully submitted combined row count. @throws {Error} For validation or publication failure, without remote error bodies. */
+/** Parse a strict UTC ISO timestamp without calendar rollover or offset coercion. @param {*} value Timestamp. @param {string} field Error label. @returns {string} Canonical UTC timestamp. @throws {Error} On malformed or impossible dates. */
+function utcTimestamp(value, field) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) throw new Error(`Invalid ${field}: expected a UTC ISO timestamp.`);
+  const date = new Date(value);
+  const canonical = value.length === 20 ? value.replace('Z', '.000Z') : value;
+  if (!Number.isFinite(date.getTime()) || date.toISOString() !== canonical) throw new Error(`Invalid ${field}: impossible UTC date.`);
+  return canonical;
+}
+
+/** Validate all files and optional capture bounds first, then make at most one publication. No publisher import in dry-run. @param {string[]} argv Arguments. @returns {Promise<number>} Successfully submitted combined row count. @throws {Error} For validation or publication failure, without remote error bodies. */
 export async function main(argv) {
-  const { files, publish } = parseArgs(argv);
+  const { files, publish, capturedAt } = parseArgs(argv);
   const seen = new Set();
   const inputs = files.map(file => {
     const deals = loadDeals(file);
@@ -97,13 +113,23 @@ export async function main(argv) {
     return { file, deals };
   });
   const deals = inputs.flatMap(input => input.deals);
+  let captureTime;
+  if (capturedAt !== undefined && capturedAt !== '') {
+    captureTime = utcTimestamp(capturedAt, 'captured_at');
+    if (Date.parse(captureTime) > Date.now()) throw new Error('Invalid captured_at: capture time is in the future.');
+    for (const input of inputs) for (const [index, deal] of input.deals.entries()) {
+      const rowTime = utcTimestamp(deal.scraped_at, `scraped_at in ${JSON.stringify(input.file)} row ${index + 1}`);
+      if (Date.parse(rowTime) > Date.parse(captureTime)) throw new Error('Invalid captured_at: capture time precedes a source row scraped_at.');
+    }
+  }
   for (const input of inputs) console.log(`Submitted ${JSON.stringify(input.file)}: ${input.deals.length}`);
   console.log(`Submitted total: ${deals.length}`);
   console.log('These are submitted counts, not independently verified persisted section counts.');
   if (!publish) { console.log('Dry run complete: no D1 call.'); return deals.length; }
   try {
     const { pushToD1 } = await import('../src/db/d1.js');
-    await pushToD1(deals, 'lululemon');
+    if (captureTime) await pushToD1(deals, 'lululemon', null, captureTime);
+    else await pushToD1(deals, 'lululemon');
     return deals.length;
   } catch {
     throw new Error('Publication failed; the snapshot may already have been completed. Verify remote state before retrying.');
