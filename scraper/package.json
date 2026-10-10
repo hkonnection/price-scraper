@@ -15,6 +15,7 @@
     "scrape:gourmetwarehouse": "node --experimental-vm-modules src/gourmetwarehouse-index.js",
     "scrape:gourmetwarehouse:dry": "node --experimental-vm-modules src/gourmetwarehouse-index.js --dry-run",
     "scrape:lululemon": "node --experimental-vm-modules src/lululemon-index.js",
+    "scrape:lululemon:daily": "node local/lululemon-daily.mjs",
     "scrape:lululemon:dry": "node --experimental-vm-modules src/lululemon-index.js --dry-run",
     "scrape:indigo": "node --experimental-vm-modules src/indigo-index.js",
     "scrape:indigo:dry": "node --experimental-vm-modules src/indigo-index.js --dry-run",
