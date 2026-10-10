@@ -11,6 +11,11 @@ on:
         description: 'Exact JSON asset names, one per line. Publish all intended sections together; never both raw and cleaned copies.'
         required: true
         type: string
+      captured_at:
+        description: 'Optional capture time in UTC ISO format (YYYY-MM-DDTHH:mm:ss[.SSS]Z); blank uses publication time'
+        required: false
+        type: string
+        default: ''
       dry_run:
         description: 'Validate saved inputs and read the live count only; do not replace the retailer snapshot'
         required: true
@@ -71,6 +76,7 @@ jobs:
           ASSET_NAMES: ${{ inputs.asset_names }}
           DRY_RUN: ${{ inputs.dry_run }}
           DIRECTORY: ${{ steps.download.outputs.directory }}
+          CAPTURED_AT: ${{ inputs.captured_at }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
@@ -86,7 +92,7 @@ jobs:
           elif [[ "$DRY_RUN" != 'true' ]]; then
             echo 'Invalid dry_run value' >&2; exit 1
           fi
-          node scraper/local/publish-lululemon.mjs "$mode" -- "${files[@]}"
+          node scraper/local/publish-lululemon.mjs "$mode" --captured-at "${CAPTURED_AT:-}" -- "${files[@]}"
 
       # Runs only after successful input processing/publication. This query is read-only,
       # including in dry-run; equality is required only after a real publication.

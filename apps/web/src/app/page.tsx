@@ -149,17 +149,20 @@ async function getData(retailerSlug: string, params: Params = {}): Promise<PageD
       retailerPaused[retailer.slug] = retailerSources.length > 0 && retailerSources.every(source => source.is_active === 0);
     }
     /**
-     * Select completed metadata for one store, preserving the existing tie-break.
+     * Select completed metadata; Lululemon replacement identity follows creation order
+     * because saved-file capture times may precede an earlier publication's wall time.
+     * Other stores retain their completion-time ordering.
      * @param retailerId - Active store identifier.
-     * @param scrapeId - Optional completed pin, otherwise the latest completion.
+     * @param scrapeId - Optional completed pin, otherwise the latest publication.
      * @returns Publication identity and its stored date, including unknown dates.
      */
     const snapshotFor = async (retailerId: number, scrapeId?: number): Promise<Snapshot> => {
       const ids = sources.filter(s => s.retailer_id === retailerId).map(s => s.id);
+      const order = retailers.find(r => r.id === retailerId)?.slug === 'lululemon' ? 'sh.id DESC' : 'sh.completed_at DESC, sh.id DESC';
       const row = ids.length ? await first<{ scrape_id: number; completed_at: string | null }>(
         `SELECT sh.id as scrape_id, sh.completed_at FROM scrape_history sh
         WHERE sh.status = 'completed' AND sh.source_id IN (${ids.map(() => '?').join(',')})
-        ${scrapeId === undefined ? 'ORDER BY sh.completed_at DESC, sh.id DESC' : 'AND sh.id = ?'} LIMIT 1`,
+        ${scrapeId === undefined ? `ORDER BY ${order}` : 'AND sh.id = ?'} LIMIT 1`,
         [...ids, ...(scrapeId === undefined ? [] : [scrapeId])]) : null;
       return { retailerId, scrapeId: row?.scrape_id ?? null, completedAt: row?.completed_at ?? null };
     };
