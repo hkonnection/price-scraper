@@ -122,6 +122,37 @@ test('ordinary Shopify captcha form strings do not block valid public CAD deals'
   }
 });
 
+/** Verify catalog prose reaches the real collector, cleaner, and inert publisher. */
+test('valid catalog prose is not an HTML access challenge', async t => {
+  for (const prose of ['ordinary', 'description', 'title']) await t.test(prose, async () => {
+    const item = product(1);
+    if (prose === 'description') item.data.description = 'Press and hold the paw';
+    if (prose === 'title') item.value = item.variations[0].value = 'Access Denied: A Thriller';
+    const { api, calls } = await collector([shell, catalog(1, 1, [item])]);
+    const result = await entrypoint(api.scrapeIndigo);
+    assert.deepEqual(result.exits, [], `${prose}: ${result.errors.join(' ')}`);
+    assert.deepEqual(result.errors, []);
+    assert.equal(calls.length, 2);
+    assert.equal(result.writes.length, 1);
+    assert.equal(result.writes[0].length, 1);
+    const row = result.writes[0][0];
+    assert.equal(row.product_name, item.variations[0].value);
+    assert.equal(row.product_code, 'sku-1');
+    assert.equal(row.sale_price, 12.5); assert.equal(row.regular_price, 25);
+    assert.equal(row.currency, 'CAD'); assert.equal(row.in_stock, 1);
+    assert.equal(row.promo_type, 'Sale & Clearance');
+    assert.deepEqual(result.state, result.writes[0]);
+  });
+});
+
+/** Verify valid JSON still needs catalog structure, even with challenge-like prose. */
+test('valid JSON without catalog structure stops before publication', async () => {
+  for (const payload of ['null', '[]', '"Press and hold the paw"',
+    { description: 'Press and hold the paw' }, { response: { results: 'Access Denied: A Thriller' } }]) {
+    await rejectSnapshot([shell, payload, catalog()], /Indigo.*missing product data or metadata/i, 2);
+  }
+});
+
 test('empty source inventory and empty eligible output both fail usefully', async () => {
   await rejectSnapshot([shell, catalog(0, 1, [])], /Indigo.*empty/i, 2);
   await rejectSnapshot([shell, catalog(1, 1, [product(1, { compare_at_price: null })])], /Indigo.*no.*deals/i, 2);
