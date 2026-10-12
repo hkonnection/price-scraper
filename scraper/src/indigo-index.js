@@ -9,6 +9,11 @@ import { getCleaner } from './cleaners/index.js';
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
+/**
+ * Collect and normalize a complete Indigo snapshot before publication.
+ * @returns {Promise<void>} Completes after dry run or publication.
+ * Exits nonzero for empty output, collection failure, or publication failure.
+ */
 async function main() {
   console.log('Starting Indigo Canada scraper...');
   console.log(`Mode: ${DRY_RUN ? 'DRY RUN (no database writes)' : 'LIVE'}`);
@@ -24,8 +29,7 @@ async function main() {
     const deals = cleaner.clean(rawDeals);
 
     if (deals.length === 0) {
-      console.log('No deals found. Exiting.');
-      return;
+      throw new Error('Indigo has no deals after normalization; existing publication was not changed.');
     }
 
     // Show sample of deals
