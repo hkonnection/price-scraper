@@ -15,12 +15,14 @@ const BROWSE_URL = `https://ac.cnstrc.com/browse/group_id/${COLLECTION}`;
 
 /**
  * Fetch one public response. Any failure stops collection before publication.
+ * Parse catalog JSON before HTML challenge checks so product prose is not a refusal.
  * Ordinary Shopify captcha form-registration strings are not a challenge.
  * @param {string} url Source-backed public URL.
- * @returns {Promise<string>} Response text.
- * @throws {Error} For HTTP errors, redirects, transport failure, or challenges.
+ * @param {number|null} [page=null] Catalog page number, or null for collection HTML.
+ * @returns {Promise<*>} Collection HTML or parsed JSON for catalog validation.
+ * @throws {Error} For HTTP errors, redirects, transport failure, challenges, or invalid JSON.
  */
-async function fetchPublic(url) {
+async function fetchPublic(url, page = null) {
   let response;
   let body;
   try {
@@ -31,6 +33,9 @@ async function fetchPublic(url) {
   } catch (error) {
     throw new Error(`Indigo request failed: ${error.message}`);
   }
+  if (page !== null) {
+    try { return JSON.parse(body); } catch { /* Classify non-JSON challenges below. */ }
+  }
   const $ = load(body);
   const challengeMarkup = $('form[action*="/challenge"], script[src*="challenge-platform"], [id^="cf-chl-"], #px-captcha, iframe[src*="hcaptcha.com"], iframe[src*="recaptcha"]').length > 0;
   $('script, style, template').remove();
@@ -39,6 +44,7 @@ async function fetchPublic(url) {
     || /^captcha[.!\s]*$/i.test(visible)) {
     throw new Error('Indigo access refusal or challenge; collection stopped without retry.');
   }
+  if (page !== null) throw new Error(`Indigo page ${page}: invalid JSON product data.`);
   return body;
 }
 
@@ -224,6 +230,7 @@ function categorizeProduct(productName, brand) {
 
 /**
  * Collect the complete public Indigo clearance inventory before returning deals.
+ * Parse catalog JSON before HTML challenge checks, then validate the complete page.
  * No later request or partial result is possible after any refused or invalid page.
  * @returns {Promise<{deals: Array<object>, totalProducts: number, totalPages: number, markdownCount: number}>} Complete snapshot.
  * @throws {Error} For empty deals, missing data, incomplete collection, or refusal.
@@ -238,9 +245,7 @@ export async function scrapeIndigo() {
     if (page > 1) await new Promise(resolve => setTimeout(resolve, DELAY_MS));
     const url = new URL(BROWSE_URL);
     url.search = new URLSearchParams({ key, page: String(page), num_results_per_page: String(PAGE_SIZE) }).toString();
-    const text = await fetchPublic(url.href);
-    let data;
-    try { data = JSON.parse(text); } catch { throw new Error(`Indigo page ${page}: invalid JSON product data.`); }
+    const data = await fetchPublic(url.href, page);
     const raw = catalogPage(data, page, total);
     total = raw.total;
     totalPages = Math.ceil(total / PAGE_SIZE);
