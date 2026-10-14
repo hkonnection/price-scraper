@@ -106,7 +106,13 @@ export function combineSections(captures, at) {
 
 /** Read only UI status, not product data or network payloads. @param {import('playwright').Page} page Browser page. @returns {Promise<object>} Expansion/refusal status. */
 async function uiState(page) {
-  return classifyUiState(await page.evaluate(() => {
+  return classifyUiState(await page.evaluate(readUiFacts));
+}
+
+/** Runs inside the page: read UI facts only. A document without a body yet (mid-navigation) reads as not settled. @returns {object} Raw UI facts. */
+export function readUiFacts() {
+    const refusalText = /access denied|request blocked|verify (?:that )?you are human|unusual traffic|captcha|security challenge|temporarily blocked|pardon our interruption/i;
+    if (!document.body) return { grids: 0, cards: 0, total: null, buttons: 0, visibleButtons: 0, enabled: false, indicators: [], refusal: refusalText.test(document.title || '') };
     /** Test ordinary rendered visibility. @param {Element} el Element. @returns {boolean} Visible. */
     function visible(el) { return Boolean(el.getClientRects().length) && getComputedStyle(el).visibility !== 'hidden'; }
     const grids = [...document.querySelectorAll('[data-testid="product-grid"]')];
@@ -123,8 +129,7 @@ async function uiState(page) {
     return { grids: grids.length, cards: grids[0]?.querySelectorAll('[data-testid="product-tile"]').length || 0,
       total: pageTotal(), buttons: buttons.length, visibleButtons: shown.length, enabled: shown.length === 1 && !shown[0].disabled && shown[0].getAttribute('aria-disabled') !== 'true',
       indicators: [...document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [data-testid*="loading"]')].filter(visible).map(el => ({ carousel: Boolean(el.closest('[class*="carousel"]')) })),
-      refusal: /access denied|request blocked|verify (?:that )?you are human|unusual traffic|captcha|security challenge|temporarily blocked|pardon our interruption/i.test(document.title + ' ' + document.body.innerText) };
-  }));
+      refusal: refusalText.test(document.title + ' ' + document.body.innerText) };
 }
 
 /** Derive loading from visible indicators; product image carousel progress bars stay on screen and never mean loading. @param {object} raw Browser-read UI facts. @returns {object} UI state with busy. */

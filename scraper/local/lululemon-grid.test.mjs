@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseGrid, combineSections, collectSection, classifyUiState, SECTIONS } from './lululemon-grid.mjs';
+import { parseGrid, combineSections, collectSection, classifyUiState, readUiFacts, SECTIONS } from './lululemon-grid.mjs';
 
 const at = '2026-10-11T15:02:03.456Z';
 /** Make one inert synthetic product tile. @param {string} code Product code. @param {string} name Name. @param {string} prices Price markup. @returns {string} HTML. */
@@ -148,4 +148,20 @@ test('a section is complete only when loaded cards equal the page total; anythin
   await assert.rejects(collectSection(fakePage([{ ...short, total: null }, { ...short, total: null }]), SECTIONS[0], settings), /40 of unknown/);
   const full = { ...short, total: 40 };
   assert.match(await collectSection(fakePage([full, full]), SECTIONS[0], settings), /product-grid/);
+});
+
+test('a page document without a body yet reads as not settled, and a refusal title is still caught', async () => {
+  const saved = globalThis.document;
+  try {
+    globalThis.document = { body: null, title: '' };
+    assert.deepEqual(readUiFacts(), { grids: 0, cards: 0, total: null, buttons: 0, visibleButtons: 0, enabled: false, indicators: [], refusal: false });
+    globalThis.document = { body: null, title: 'Access Denied' };
+    assert.equal(readUiFacts().refusal, true);
+  } finally { globalThis.document = saved; }
+  const noBody = { grids: 0, cards: 0, total: null, buttons: 0, visibleButtons: 0, enabled: false, indicators: [], refusal: false };
+  const full = { ...initial, cards: 2, total: 2, buttons: 0, visibleButtons: 0, enabled: false };
+  const page = fakePage([full]);
+  let reads = 0; const read = page.evaluate; page.evaluate = async () => (reads++ === 0 ? noBody : read());
+  assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), /product-grid/);
+  await assert.rejects(collectSection(fakePage([noBody]), SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 3 }), /incomplete|stall/i);
 });
