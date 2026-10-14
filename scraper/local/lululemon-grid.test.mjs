@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseGrid, combineSections, collectSection, SECTIONS } from './lululemon-grid.mjs';
+import { parseGrid, combineSections, collectSection, classifyUiState, SECTIONS } from './lululemon-grid.mjs';
 
 const at = '2026-10-11T15:02:03.456Z';
 /** Make one inert synthetic product tile. @param {string} code Product code. @param {string} name Name. @param {string} prices Price markup. @returns {string} HTML. */
@@ -81,12 +81,14 @@ test('valid later capture with no new products is accepted but missing/empty/mal
 function fakePage(states, status = 200) {
   let index = 0, clicked = false;
   const trace = [], handlers = {};
+  const advance = () => { if (index < states.length - 1) index++; };
   return { trace, on: (event, fn) => { handlers[event] = fn; }, off: () => {},
     goto: async url => { trace.push(url); return { status: () => status, ok: () => status === 200 }; },
     evaluate: async () => { const result = states[index]; if (clicked && index < states.length - 1) index++; return result; },
     getByRole: () => ({ click: async () => { clicked = true; trace.push('click'); } }),
     waitForTimeout: async () => {},
-    locator: () => ({ evaluate: async () => grid(tile('x') + tile('y')) }),
+    locator: () => ({ evaluate: async () => grid(tile('x') + tile('y')), last: () => ({ scrollIntoViewIfNeeded: async () => { trace.push('scroll'); advance(); } }) }),
+    mouse: { wheel: async () => {} },
   };
 }
 test('collector stops before another click when refusal arrives during ordinary pacing', async () => {
@@ -96,7 +98,8 @@ test('collector stops before another click when refusal arrives during ordinary 
   assert.deepEqual(page.trace, [SECTIONS[0].url]);
 });
 
-const initial = { grids: 1, cards: 1, buttons: 1, visibleButtons: 1, enabled: true, busy: false, refusal: false };
+const initial = { grids: 1, cards: 1, buttons: 1, visibleButtons: 1, enabled: true, indicators: [], refusal: false };
+const loading = [{ carousel: false }];
 const complete = { ...initial, cards: 2, buttons: 0, visibleButtons: 0 };
 
 test('HTTP 429 resource refusal halts before clicking without reading any network body', async () => {
@@ -108,7 +111,7 @@ test('HTTP 429 resource refusal halts before clicking without reading any networ
 });
 
 test('collector visits section once and uses ordinary button through loading before saving outerHTML', async () => {
-  const page = fakePage([initial, { ...initial, busy: true, visibleButtons: 0 }, complete, complete]);
+  const page = fakePage([initial, { ...initial, indicators: loading, visibleButtons: 0 }, complete, complete]);
   const html = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 });
   assert.match(html, /product-grid/);
   assert.deepEqual(page.trace, [SECTIONS[0].url, 'click']);
@@ -122,4 +125,27 @@ test('collector stops for refusal, HTTP rejection, empty grid, ambiguous markup 
     [[initial], 200, /incomplete|stall/i], [[{ ...initial, visibleButtons: 0 }], 200, /incomplete/i],
     [[initial, { ...complete, cards: 1 }], 200, /incomplete|stall/i], [[initial, { ...complete, cards: 0 }], 200, /empty|incomplete/i],
   ]) await assert.rejects(collectSection(fakePage(states, status), SECTIONS[0], settings), expected);
+});
+
+test('permanent product image carousel progress bars are not loading, but any other visible indicator is', () => {
+  const carousels = Array.from({ length: 6 }, () => ({ carousel: true }));
+  assert.equal(classifyUiState({ ...initial, indicators: carousels }).busy, false);
+  assert.equal(classifyUiState({ ...initial, indicators: [...carousels, ...loading] }).busy, true);
+  assert.throws(() => classifyUiState({ ...initial, indicators: undefined }), /malformed/i);
+});
+
+test('live Women page state (2026-10-14): carousel bars and a not-yet-laid-out View More scroll once, then expand', async () => {
+  const carousels = Array.from({ length: 6 }, () => ({ carousel: true }));
+  const probe = { ...initial, cards: 40, visibleButtons: 0, enabled: false, indicators: carousels };
+  const page = fakePage([probe, { ...probe, visibleButtons: 1, enabled: true }, { ...complete, cards: 80, indicators: carousels }, { ...complete, cards: 80, indicators: carousels }]);
+  const html = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 });
+  assert.match(html, /product-grid/);
+  assert.deepEqual(page.trace, [SECTIONS[0].url, 'scroll', 'click']);
+});
+
+test('a View More that never lays out after one scroll stops with the observed state', async () => {
+  const probe = { ...initial, cards: 40, visibleButtons: 0, enabled: false, indicators: [{ carousel: true }] };
+  const page = fakePage([probe]);
+  await assert.rejects(collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 3 }), /incomplete.*cards 40.*View More 0\/1/i);
+  assert.deepEqual(page.trace, [SECTIONS[0].url, 'scroll']);
 });

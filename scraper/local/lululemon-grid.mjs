@@ -105,7 +105,7 @@ export function combineSections(captures, at) {
 
 /** Read only UI status, not product data or network payloads. @param {import('playwright').Page} page Browser page. @returns {Promise<object>} Expansion/refusal status. */
 async function uiState(page) {
-  return page.evaluate(() => {
+  return classifyUiState(await page.evaluate(() => {
     /** Test ordinary rendered visibility. @param {Element} el Element. @returns {boolean} Visible. */
     function visible(el) { return Boolean(el.getClientRects().length) && getComputedStyle(el).visibility !== 'hidden'; }
     const grids = [...document.querySelectorAll('[data-testid="product-grid"]')];
@@ -113,9 +113,21 @@ async function uiState(page) {
     const shown = buttons.filter(visible);
     return { grids: grids.length, cards: grids[0]?.querySelectorAll('[data-testid="product-tile"]').length || 0,
       buttons: buttons.length, visibleButtons: shown.length, enabled: shown.length === 1 && !shown[0].disabled && shown[0].getAttribute('aria-disabled') !== 'true',
-      busy: [...document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [data-testid*="loading"]')].some(visible),
+      indicators: [...document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [data-testid*="loading"]')].filter(visible).map(el => ({ carousel: Boolean(el.closest('[class*="carousel"]')) })),
       refusal: /access denied|request blocked|verify (?:that )?you are human|unusual traffic|captcha|security challenge|temporarily blocked|pardon our interruption/i.test(document.title + ' ' + document.body.innerText) };
-  });
+  }));
+}
+
+/** Derive loading from visible indicators; product image carousel progress bars stay on screen and never mean loading. @param {object} raw Browser-read UI facts. @returns {object} UI state with busy. */
+export function classifyUiState(raw) {
+  if (!Array.isArray(raw?.indicators)) throw new Error('Malformed UI state.');
+  return { ...raw, busy: raw.indicators.some(indicator => !indicator.carousel) };
+}
+
+/** Bring a lazily laid-out View More into view with ordinary scrolling only. @param {import('playwright').Page} page Browser page. @returns {Promise<void>} Completion. */
+async function revealViewMore(page) {
+  await page.locator(TILE).last().scrollIntoViewIfNeeded();
+  await page.mouse.wheel(0, 800);
 }
 
 /** Visit once, expand with paced ordinary clicks, and return only grid outerHTML. Never retry retailer requests. @param {import('playwright').Page} page Headed Chrome page. @param {object} section Official section. @param {object} settings Bounded waits, overridable for offline tests only. @returns {Promise<string>} Complete grid HTML. @throws {Error} On refusal, empty/missing grid, stalled loading or expansion. */
@@ -132,14 +144,16 @@ export async function collectSection(page, section, settings = {}) {
     if (!response?.ok()) throw new Error(`Collection refused: HTTP ${response?.status() ?? 'unknown'}.`);
     let previous = 0, clicks = 0, expectGrowth = false;
     while (true) {
-      let state;
+      let state, revealed = false;
       for (let elapsed = 0; ; elapsed += pollMs) {
         state = await uiState(page);
         if (refused || state.refusal) throw new Error('Collection refused by retailer. No publication.');
         if (state.grids > 1) throw new Error('Unexpected product grid markup.');
         if (state.grids === 1 && !state.busy && state.cards === 0) throw new Error('Empty captured section.');
-        if (state.grids === 1 && !state.busy && state.cards > 0 && (!expectGrowth || state.cards > previous) && (state.buttons === 0 || state.enabled || state.visibleButtons === 0)) break;
-        if (elapsed >= timeoutMs) throw new Error(state.grids === 1 && state.cards === 0 ? 'Empty captured section.' : 'Incomplete expansion or stalled loading.');
+        const settled = state.grids === 1 && !state.busy && state.cards > 0 && (!expectGrowth || state.cards > previous);
+        if (settled && (state.buttons === 0 || state.enabled)) break;
+        if (settled && state.buttons === 1 && state.visibleButtons === 0 && !revealed) { await revealViewMore(page); revealed = true; }
+        if (elapsed >= timeoutMs) throw new Error(state.grids === 1 && state.cards === 0 ? 'Empty captured section.' : `Incomplete expansion or stalled loading (cards ${state.cards}, busy ${state.busy}, View More ${state.visibleButtons}/${state.buttons} visible).`);
         await page.waitForTimeout(pollMs);
       }
       if (state.cards < previous) throw new Error('Incomplete expansion: grid shrank.');
