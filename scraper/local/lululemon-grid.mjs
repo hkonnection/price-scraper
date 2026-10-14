@@ -8,6 +8,7 @@ export const SECTIONS = Object.freeze([
 ]);
 const GRID = '[data-testid="product-grid"]';
 const TILE = '[data-testid="product-tile"]';
+const VIEW_MORE = '[data-lll-component-name="cdp:view_more_products"]';
 
 /** Require an actual UTC timestamp, never a scheduled date. @param {string} at Timestamp. @returns {void} @throws {Error} On malformed date. */
 export function validateCaptureTime(at) {
@@ -109,10 +110,18 @@ async function uiState(page) {
     /** Test ordinary rendered visibility. @param {Element} el Element. @returns {boolean} Visible. */
     function visible(el) { return Boolean(el.getClientRects().length) && getComputedStyle(el).visibility !== 'hidden'; }
     const grids = [...document.querySelectorAll('[data-testid="product-grid"]')];
-    const buttons = [...document.querySelectorAll('button, [role="button"]')].filter(b => /^view more$/i.test((b.textContent || b.getAttribute('aria-label') || '').trim()));
+    const buttons = [...document.querySelectorAll('[data-lll-component-name="cdp:view_more_products"]')];
+    /** Read the listing's own product total from the page's embedded catalog data. @returns {number|null} Total, or null when absent. */
+    function pageTotal() {
+      try {
+        const queries = JSON.parse(document.getElementById('__NEXT_DATA__')?.textContent || 'null')?.props?.pageProps?.dehydratedState?.queries || [];
+        const total = queries.find(q => q.queryKey?.[0] === 'catalogPageData')?.state?.data?.pages?.[0]?.data?.attributes?.totalCount;
+        return Number.isInteger(total) ? total : null;
+      } catch { return null; }
+    }
     const shown = buttons.filter(visible);
     return { grids: grids.length, cards: grids[0]?.querySelectorAll('[data-testid="product-tile"]').length || 0,
-      buttons: buttons.length, visibleButtons: shown.length, enabled: shown.length === 1 && !shown[0].disabled && shown[0].getAttribute('aria-disabled') !== 'true',
+      total: pageTotal(), buttons: buttons.length, visibleButtons: shown.length, enabled: shown.length === 1 && !shown[0].disabled && shown[0].getAttribute('aria-disabled') !== 'true',
       indicators: [...document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [data-testid*="loading"]')].filter(visible).map(el => ({ carousel: Boolean(el.closest('[class*="carousel"]')) })),
       refusal: /access denied|request blocked|verify (?:that )?you are human|unusual traffic|captcha|security challenge|temporarily blocked|pardon our interruption/i.test(document.title + ' ' + document.body.innerText) };
   }));
@@ -124,11 +133,6 @@ export function classifyUiState(raw) {
   return { ...raw, busy: raw.indicators.some(indicator => !indicator.carousel) };
 }
 
-/** Bring a lazily laid-out View More into view with ordinary scrolling only. @param {import('playwright').Page} page Browser page. @returns {Promise<void>} Completion. */
-async function revealViewMore(page) {
-  await page.locator(TILE).last().scrollIntoViewIfNeeded();
-  await page.mouse.wheel(0, 800);
-}
 
 /** Visit once, expand with paced ordinary clicks, and return only grid outerHTML. Never retry retailer requests. @param {import('playwright').Page} page Headed Chrome page. @param {object} section Official section. @param {object} settings Bounded waits, overridable for offline tests only. @returns {Promise<string>} Complete grid HTML. @throws {Error} On refusal, empty/missing grid, stalled loading or expansion. */
 export async function collectSection(page, section, settings = {}) {
@@ -144,7 +148,7 @@ export async function collectSection(page, section, settings = {}) {
     if (!response?.ok()) throw new Error(`Collection refused: HTTP ${response?.status() ?? 'unknown'}.`);
     let previous = 0, clicks = 0, expectGrowth = false;
     while (true) {
-      let state, revealed = false;
+      let state;
       for (let elapsed = 0; ; elapsed += pollMs) {
         state = await uiState(page);
         if (refused || state.refusal) throw new Error('Collection refused by retailer. No publication.');
@@ -152,7 +156,6 @@ export async function collectSection(page, section, settings = {}) {
         if (state.grids === 1 && !state.busy && state.cards === 0) throw new Error('Empty captured section.');
         const settled = state.grids === 1 && !state.busy && state.cards > 0 && (!expectGrowth || state.cards > previous);
         if (settled && (state.buttons === 0 || state.enabled)) break;
-        if (settled && state.buttons === 1 && state.visibleButtons === 0 && !revealed) { await revealViewMore(page); revealed = true; }
         if (elapsed >= timeoutMs) throw new Error(state.grids === 1 && state.cards === 0 ? 'Empty captured section.' : `Incomplete expansion or stalled loading (cards ${state.cards}, busy ${state.busy}, View More ${state.visibleButtons}/${state.buttons} visible).`);
         await page.waitForTimeout(pollMs);
       }
@@ -162,6 +165,7 @@ export async function collectSection(page, section, settings = {}) {
         const final = await uiState(page);
         if (refused || final.refusal) throw new Error('Collection refused by retailer. No publication.');
         if (final.grids !== 1 || final.busy || final.buttons !== 0 || final.cards !== state.cards) throw new Error('Incomplete expansion: grid did not settle.');
+        if (!Number.isInteger(final.total) || final.cards !== final.total) throw new Error(`Incomplete section: ${final.cards} of ${final.total ?? 'unknown'} products loaded.`);
         return await page.locator(GRID).evaluate(el => el.outerHTML);
       }
       if (state.buttons !== 1 || state.visibleButtons !== 1 || !state.enabled || clicks >= maxClicks) throw new Error('Incomplete expansion: View More is unavailable or limit reached.');
@@ -170,7 +174,7 @@ export async function collectSection(page, section, settings = {}) {
       const beforeClick = await uiState(page);
       if (refused || beforeClick.refusal) throw new Error('Collection refused by retailer. No publication.');
       if (beforeClick.busy || beforeClick.grids !== 1 || beforeClick.cards !== previous || beforeClick.buttons !== 1 || beforeClick.visibleButtons !== 1 || !beforeClick.enabled) throw new Error('Incomplete expansion: UI changed before View More.');
-      await page.getByRole('button', { name: /^view more$/i }).click({ timeout: timeoutMs });
+      await page.locator(VIEW_MORE).click({ timeout: timeoutMs });
     }
   } finally { page.off('response', onResponse); }
 }

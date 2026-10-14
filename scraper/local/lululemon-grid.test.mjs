@@ -81,14 +81,11 @@ test('valid later capture with no new products is accepted but missing/empty/mal
 function fakePage(states, status = 200) {
   let index = 0, clicked = false;
   const trace = [], handlers = {};
-  const advance = () => { if (index < states.length - 1) index++; };
   return { trace, on: (event, fn) => { handlers[event] = fn; }, off: () => {},
     goto: async url => { trace.push(url); return { status: () => status, ok: () => status === 200 }; },
     evaluate: async () => { const result = states[index]; if (clicked && index < states.length - 1) index++; return result; },
-    getByRole: () => ({ click: async () => { clicked = true; trace.push('click'); } }),
     waitForTimeout: async () => {},
-    locator: () => ({ evaluate: async () => grid(tile('x') + tile('y')), last: () => ({ scrollIntoViewIfNeeded: async () => { trace.push('scroll'); advance(); } }) }),
-    mouse: { wheel: async () => {} },
+    locator: selector => ({ evaluate: async () => grid(tile('x') + tile('y')), click: async () => { clicked = true; trace.push(selector.includes('view_more') ? 'click' : 'wrong click'); } }),
   };
 }
 test('collector stops before another click when refusal arrives during ordinary pacing', async () => {
@@ -98,7 +95,7 @@ test('collector stops before another click when refusal arrives during ordinary 
   assert.deepEqual(page.trace, [SECTIONS[0].url]);
 });
 
-const initial = { grids: 1, cards: 1, buttons: 1, visibleButtons: 1, enabled: true, indicators: [], refusal: false };
+const initial = { grids: 1, cards: 1, total: 2, buttons: 1, visibleButtons: 1, enabled: true, indicators: [], refusal: false };
 const loading = [{ carousel: false }];
 const complete = { ...initial, cards: 2, buttons: 0, visibleButtons: 0 };
 
@@ -134,18 +131,21 @@ test('permanent product image carousel progress bars are not loading, but any ot
   assert.throws(() => classifyUiState({ ...initial, indicators: undefined }), /malformed/i);
 });
 
-test('live Women page state (2026-10-14): carousel bars and a not-yet-laid-out View More scroll once, then expand', async () => {
+test('live Women page state (2026-10-14): permanent carousel bars do not block the View More link expansion', async () => {
   const carousels = Array.from({ length: 6 }, () => ({ carousel: true }));
-  const probe = { ...initial, cards: 40, visibleButtons: 0, enabled: false, indicators: carousels };
-  const page = fakePage([probe, { ...probe, visibleButtons: 1, enabled: true }, { ...complete, cards: 80, indicators: carousels }, { ...complete, cards: 80, indicators: carousels }]);
+  const probe = { ...initial, cards: 40, total: 80, indicators: carousels };
+  const done = { ...probe, cards: 80, buttons: 0, visibleButtons: 0, enabled: false };
+  const page = fakePage([probe, { ...probe, indicators: [...carousels, ...loading] }, done, done]);
   const html = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 });
   assert.match(html, /product-grid/);
-  assert.deepEqual(page.trace, [SECTIONS[0].url, 'scroll', 'click']);
+  assert.deepEqual(page.trace, [SECTIONS[0].url, 'click']);
 });
 
-test('a View More that never lays out after one scroll stops with the observed state', async () => {
-  const probe = { ...initial, cards: 40, visibleButtons: 0, enabled: false, indicators: [{ carousel: true }] };
-  const page = fakePage([probe]);
-  await assert.rejects(collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 3 }), /incomplete.*cards 40.*View More 0\/1/i);
-  assert.deepEqual(page.trace, [SECTIONS[0].url, 'scroll']);
+test('a section is complete only when loaded cards equal the page total; anything short or unknown stops', async () => {
+  const settings = { paceMs: 0, pollMs: 1, timeoutMs: 3 };
+  const short = { ...initial, cards: 40, total: 609, buttons: 0, visibleButtons: 0, enabled: false };
+  await assert.rejects(collectSection(fakePage([short, short]), SECTIONS[0], settings), /Incomplete section: 40 of 609/);
+  await assert.rejects(collectSection(fakePage([{ ...short, total: null }, { ...short, total: null }]), SECTIONS[0], settings), /40 of unknown/);
+  const full = { ...short, total: 40 };
+  assert.match(await collectSection(fakePage([full, full]), SECTIONS[0], settings), /product-grid/);
 });
