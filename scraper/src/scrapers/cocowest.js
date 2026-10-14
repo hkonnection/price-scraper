@@ -206,6 +206,7 @@ function filterValidPosts(posts) {
  * Uses content-based detection: finds potential posts, verifies they have deals,
  * then extracts dates from the verified pages.
  * @returns {Promise<{deals: Array<Deal>, posts: Array, flyerDates: string}>}
+ * @throws {Error} If no currently valid posts or no parsed deals can be published.
  */
 export async function scrapeCocowest() {
   // Fetch homepage
@@ -255,10 +256,9 @@ export async function scrapeCocowest() {
   const validPosts = filterValidPosts(verifiedPosts);
   console.log(`${validPosts.length} posts are currently valid`);
 
-  // Fallback to most recent if none valid
-  if (validPosts.length === 0 && verifiedPosts.length > 0) {
-    console.log('No valid posts found. Using most recent post as fallback.');
-    validPosts.push(verifiedPosts[0]);
+  // An expired or future fallback would replace the snapshot with invisible rows.
+  if (validPosts.length === 0) {
+    throw new Error('No currently valid Costco posts found; existing publication was not changed.');
   }
 
   // Parse deals from each valid post
@@ -282,6 +282,9 @@ export async function scrapeCocowest() {
   // Deduplicate by product code (keep the one with latest valid_to)
   const deduped = deduplicateDeals(allDeals);
   console.log(`\nTotal unique deals: ${deduped.length}`);
+  if (deduped.length === 0) {
+    throw new Error('No Costco deals parsed from currently valid posts; existing publication was not changed.');
+  }
 
   return {
     deals: deduped,
