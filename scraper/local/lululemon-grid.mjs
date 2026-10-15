@@ -9,6 +9,9 @@ export const SECTIONS = Object.freeze([
 const GRID = '[data-testid="product-grid"]';
 const TILE = '[data-testid="product-tile"]';
 const VIEW_MORE = '[data-lll-component-name="cdp:view_more_products"]';
+// Each View More click fetches the next 40 products from this endpoint for the section's own category id
+// (page[limit]=40, page[offset] += 40): one request per click in saved Women and Men captures.
+const PRODUCT_DATA_PATH = '/.uf-svc/v1/categories/';
 
 /** Require an actual UTC timestamp, never a scheduled date. @param {string} at Timestamp. @returns {void} @throws {Error} On malformed date. */
 export function validateCaptureTime(at) {
@@ -161,8 +164,12 @@ function linkFacts(state) {
 /** Keep only a URL's path for logs: no query, fragment, host or control characters. @param {URL} url Parsed URL. @returns {string} Bounded path. */
 function logPath(url) { return url.pathname.replace(/[\x00-\x20\x7f]/g, '').slice(0, 200); }
 
+/** Name the product-data request path a section's View More click fires. @param {object} section Official section. @returns {string} Category endpoint path for the section URL's category id. */
+export function productDataPath(section) { return PRODUCT_DATA_PATH + new URL(section.url).pathname.split('/').pop(); }
+
 /** Visit once, expand with paced ordinary clicks, and return only grid outerHTML. Never retry retailer requests.
- * Logs each View More click, each View More link check (identical consecutive poll results are counted, not repeated) and the status and path of every retailer XHR after a click. Any 4xx on those XHRs is a refusal.
+ * Logs each View More click, each View More link check (identical consecutive poll results are counted, not repeated) and the status and path of every retailer XHR after a click.
+ * A 4xx on the section's product-data request after a click is a refusal; other XHR statuses are only logged. 401, 403 and 429 from any retailer resource still refuse.
  * @param {import('playwright').Page} page Headed Chrome page.
  * @param {object} section Official section.
  * @param {object} settings Bounded waits (overridable for offline tests only) and `log`, the run.log writer.
@@ -171,10 +178,11 @@ function logPath(url) { return url.pathname.replace(/[\x00-\x20\x7f]/g, '').slic
  */
 export async function collectSection(page, section, settings = {}) {
   const { paceMs = 1200, pollMs = 250, timeoutMs = 30000, maxClicks = 200, log = () => {} } = settings;
+  const dataPath = productDataPath(section);
   let refused = null, clicks = 0, checks = 0, lastFacts = null, repeats = 0, lastRepeat = '';
   /** Write one diagnostic line without letting a logging failure replace the collector's own outcome. @param {string} line Diagnostic. @returns {void} */
   function note(line) { try { log(line); } catch { /* Diagnostics are best effort. */ } }
-  /** Detect refusal responses without inspecting bodies; record status and path of retailer XHRs after a click. @param {object} response Browser response. @returns {void} */
+  /** Detect refusal responses without inspecting bodies; record status and path of retailer XHRs after a click, marking the product-data request. @param {object} response Browser response. @returns {void} */
   function onResponse(response) {
     const url = new URL(response.url());
     if (url.hostname !== 'shop.lululemon.com') return;
@@ -182,8 +190,9 @@ export async function collectSection(page, section, settings = {}) {
     let type = '';
     try { type = response.request().resourceType(); } catch { /* Unknown type is not an XHR. */ }
     const call = clicks > 0 && (type === 'xhr' || type === 'fetch');
-    if (call) note(`${section.name} XHR after click ${clicks}: HTTP ${status} ${logPath(url)}`);
-    if (!refused && call && status >= 400 && status < 500) refused = `View More request HTTP ${status} ${logPath(url)}`;
+    const productData = call && url.pathname === dataPath;
+    if (call) note(`${section.name} ${productData ? 'product-data ' : ''}XHR after click ${clicks}: HTTP ${status} ${logPath(url)}`);
+    if (!refused && productData && status >= 400 && status < 500) refused = `View More product-data request HTTP ${status} ${logPath(url)}`;
     else if (!refused && [401, 403, 429].includes(status)) refused = `HTTP ${status} ${logPath(url)}`;
   }
   /** Stop on a recorded refusal response or refusal page text. @param {object} state UI state. @returns {void} @throws {Error} On refusal. */

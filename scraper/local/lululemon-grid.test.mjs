@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseGrid, combineSections, collectSection, classifyUiState, readUiFacts, SECTIONS } from './lululemon-grid.mjs';
+import { parseGrid, combineSections, collectSection, classifyUiState, readUiFacts, productDataPath, SECTIONS } from './lululemon-grid.mjs';
 
 const at = '2026-10-11T15:02:03.456Z';
 /** Make one inert synthetic product tile. @param {string} code Product code. @param {string} name Name. @param {string} prices Price markup. @returns {string} HTML. */
@@ -193,28 +193,57 @@ test('repeated identical link checks are counted, and a stall says the click cou
     { message: 'Incomplete expansion or stalled loading (cards 1, busy false, View More 1/1 visible, link disabled false, aria-disabled true, enabled false; before the first View More click).' });
 });
 
-test('any 4xx retailer XHR after a View More click stops the run, logging only status and URL path', async () => {
+const MEN_DATA = 'https://shop.lululemon.com/.uf-svc/v1/categories/n18mhdznrqw?filter%5Bsku.availability%5D=true%2Cfalse&page%5Blimit%5D=40&page%5Boffset%5D=40&slug=men-we-made-too-much&token=secretvalue';
+
+test('each section product-data request is the category endpoint named by the section URL category id', () => {
+  assert.deepEqual(SECTIONS.map(productDataPath), ['/.uf-svc/v1/categories/n16o10z8mhd', '/.uf-svc/v1/categories/n18mhdznrqw', '/.uf-svc/v1/categories/n14w56z8mhd']);
+});
+
+test('a 4xx on the View More product-data request (the section category) stops the run, logging only status and path', async () => {
   for (const status of [400, 404, 418, 499]) {
     const log = [];
-    const page = clickingPage([initial, initial], [response('https://shop.lululemon.com/api/cdp/products?page=2&token=secretvalue', status)]);
+    const page = clickingPage([initial, initial], [response(MEN_DATA, status, status % 2 ? 'fetch' : 'xhr')]);
     const error = await collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) }).catch(caught => caught);
-    assert.equal(error.message, `Collection refused by retailer: View More request HTTP ${status} /api/cdp/products. No publication.`);
-    assert.ok(log.includes(`Men XHR after click 1: HTTP ${status} /api/cdp/products`), log.join('\n'));
-    assert.doesNotMatch(log.join('\n') + error.message, /secret|page=2|\?/);
+    assert.equal(error.message, `Collection refused by retailer: View More product-data request HTTP ${status} /.uf-svc/v1/categories/n18mhdznrqw. No publication.`);
+    assert.ok(log.includes(`Men product-data XHR after click 1: HTTP ${status} /.uf-svc/v1/categories/n18mhdznrqw`), log.join('\n'));
+    assert.doesNotMatch(log.join('\n') + error.message, /secret|offset|slug|\?/);
     assert.deepEqual(page.trace, [SECTIONS[1].url, 'click']);
   }
+});
+
+test('a 4xx on any other retailer XHR after a click is logged and expansion continues', async () => {
+  const log = [];
+  const page = clickingPage([initial, { ...initial, indicators: loading, visibleButtons: 0, link: null }, complete, complete], [
+    response('https://shop.lululemon.com/api/dataenablement/profile', 404), response('https://shop.lululemon.com/api/graphql', 400, 'fetch'),
+    response('https://shop.lululemon.com/.uf-svc/v1/categories/n16o10z8mhd?page%5Boffset%5D=40', 400),
+    response('https://shop.lululemon.com/.uf-svc/v1/stores?filter%5Bcountry%5D=CA', 410),
+  ]);
+  assert.match(await collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) }), /product-grid/);
+  assert.deepEqual(log.filter(line => line.includes('XHR')), [
+    'Men XHR after click 1: HTTP 404 /api/dataenablement/profile', 'Men XHR after click 1: HTTP 400 /api/graphql',
+    'Men XHR after click 1: HTTP 400 /.uf-svc/v1/categories/n16o10z8mhd', 'Men XHR after click 1: HTTP 410 /.uf-svc/v1/stores',
+  ]);
+  assert.equal(log.at(-1), 'Men complete: 2 of 2 products after 1 View More clicks.');
 });
 
 test('successful, non-XHR, other-host and pre-click responses do not stop expansion; only post-click retailer XHRs are logged', async () => {
   const log = [];
   const page = clickingPage([initial, { ...initial, indicators: loading, visibleButtons: 0 }, complete, complete], [
-    response('https://shop.lululemon.com/api/cdp/products?page=2', 200), response('https://shop.lululemon.com/api/next', 304, 'fetch'),
+    response('https://shop.lululemon.com/.uf-svc/v1/categories/n16o10z8mhd?page%5Boffset%5D=40', 200), response('https://shop.lululemon.com/api/next', 304, 'fetch'),
     response('https://shop.lululemon.com/missing.png', 404, 'image'), response('https://analytics.example/collect', 400),
-  ], [response('https://shop.lululemon.com/api/before', 404)]);
+  ], [response('https://shop.lululemon.com/.uf-svc/v1/categories/n16o10z8mhd', 404)]);
   assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) }), /product-grid/);
-  assert.deepEqual(log.filter(line => line.includes('XHR')), ['Women XHR after click 1: HTTP 200 /api/cdp/products', 'Women XHR after click 1: HTTP 304 /api/next']);
-  const refusal = clickingPage([initial, initial], [response('https://shop.lululemon.com/missing.png', 429, 'image')]);
-  await assert.rejects(collectSection(refusal, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), { message: 'Collection refused by retailer: HTTP 429 /missing.png. No publication.' });
+  assert.deepEqual(log.filter(line => line.includes('XHR')), ['Women product-data XHR after click 1: HTTP 200 /.uf-svc/v1/categories/n16o10z8mhd', 'Women XHR after click 1: HTTP 304 /api/next']);
+});
+
+test('401, 403 and 429 from any retailer resource still refuse, before or after a click, product data or not', async () => {
+  for (const [status, url, type, when] of [[429, 'https://shop.lululemon.com/missing.png', 'image', 'after'], [403, 'https://shop.lululemon.com/api/dataenablement/profile', 'xhr', 'after'],
+    [401, 'https://shop.lululemon.com/api/graphql', 'fetch', 'before'], [403, MEN_DATA, 'xhr', 'after']]) {
+    const path = new URL(url).pathname;
+    const page = clickingPage([initial, initial], when === 'after' ? [response(url, status, type)] : [], when === 'before' ? [response(url, status, type)] : []);
+    const expected = url === MEN_DATA ? `View More product-data request HTTP ${status} ${path}` : `HTTP ${status} ${path}`;
+    await assert.rejects(collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), { message: `Collection refused by retailer: ${expected}. No publication.` });
+  }
 });
 
 test('the browser-side reader reports the View More link disabled and aria-disabled attributes', () => {
