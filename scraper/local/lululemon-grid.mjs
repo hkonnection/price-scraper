@@ -128,6 +128,7 @@ export function readUiFacts() {
     const shown = buttons.filter(visible);
     return { grids: grids.length, cards: grids[0]?.querySelectorAll('[data-testid="product-tile"]').length || 0,
       total: pageTotal(), buttons: buttons.length, visibleButtons: shown.length, enabled: shown.length === 1 && !shown[0].disabled && shown[0].getAttribute('aria-disabled') !== 'true',
+      link: shown.length === 1 ? { disabled: Boolean(shown[0].disabled), ariaDisabled: shown[0].getAttribute('aria-disabled') } : null,
       indicators: [...document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [data-testid*="loading"]')].filter(visible).map(el => ({ carousel: Boolean(el.closest('[class*="carousel"]')) })),
       refusal: refusalText.test(document.title + ' ' + document.body.innerText) };
 }
@@ -151,47 +152,98 @@ export async function refusalShape(response) {
   } catch { return ''; }
 }
 
-/** Visit once, expand with paced ordinary clicks, and return only grid outerHTML. Never retry retailer requests. @param {import('playwright').Page} page Headed Chrome page. @param {object} section Official section. @param {object} settings Bounded waits, overridable for offline tests only. @returns {Promise<string>} Complete grid HTML. @throws {Error} On refusal, empty/missing grid, stalled loading or expansion. */
+/** Describe the View More link as read by one status check. @param {object} state UI state. @returns {string} Disabled, aria-disabled and enabled facts. */
+function linkFacts(state) {
+  const link = state.link;
+  return `disabled ${link ? link.disabled : 'n/a'}, aria-disabled ${link ? link.ariaDisabled ?? 'none' : 'n/a'}, enabled ${state.enabled}`;
+}
+
+/** Keep only a URL's path for logs: no query, fragment, host or control characters. @param {URL} url Parsed URL. @returns {string} Bounded path. */
+function logPath(url) { return url.pathname.replace(/[\x00-\x20\x7f]/g, '').slice(0, 200); }
+
+/** Visit once, expand with paced ordinary clicks, and return only grid outerHTML. Never retry retailer requests.
+ * Logs each View More click, each View More link check (identical consecutive poll results are counted, not repeated) and the status and path of every retailer XHR after a click. Any 4xx on those XHRs is a refusal.
+ * @param {import('playwright').Page} page Headed Chrome page.
+ * @param {object} section Official section.
+ * @param {object} settings Bounded waits (overridable for offline tests only) and `log`, the run.log writer.
+ * @returns {Promise<string>} Complete grid HTML.
+ * @throws {Error} On refusal, empty/missing grid, stalled loading or expansion.
+ */
 export async function collectSection(page, section, settings = {}) {
-  const { paceMs = 1200, pollMs = 250, timeoutMs = 30000, maxClicks = 200 } = settings;
-  let refused = false;
-  /** Detect explicit refusal responses without inspecting response bodies. @param {object} response Browser response. @returns {void} */
+  const { paceMs = 1200, pollMs = 250, timeoutMs = 30000, maxClicks = 200, log = () => {} } = settings;
+  let refused = null, clicks = 0, checks = 0, lastFacts = null, repeats = 0, lastRepeat = '';
+  /** Write one diagnostic line without letting a logging failure replace the collector's own outcome. @param {string} line Diagnostic. @returns {void} */
+  function note(line) { try { log(line); } catch { /* Diagnostics are best effort. */ } }
+  /** Detect refusal responses without inspecting bodies; record status and path of retailer XHRs after a click. @param {object} response Browser response. @returns {void} */
   function onResponse(response) {
-    if (new URL(response.url()).hostname === 'shop.lululemon.com' && [401, 403, 429].includes(response.status())) refused = true;
+    const url = new URL(response.url());
+    if (url.hostname !== 'shop.lululemon.com') return;
+    const status = response.status();
+    let type = '';
+    try { type = response.request().resourceType(); } catch { /* Unknown type is not an XHR. */ }
+    const call = clicks > 0 && (type === 'xhr' || type === 'fetch');
+    if (call) note(`${section.name} XHR after click ${clicks}: HTTP ${status} ${logPath(url)}`);
+    if (!refused && call && status >= 400 && status < 500) refused = `View More request HTTP ${status} ${logPath(url)}`;
+    else if (!refused && [401, 403, 429].includes(status)) refused = `HTTP ${status} ${logPath(url)}`;
+  }
+  /** Stop on a recorded refusal response or refusal page text. @param {object} state UI state. @returns {void} @throws {Error} On refusal. */
+  function stopIfRefused(state) {
+    if (refused || state.refusal) throw new Error(`Collection refused by retailer${refused ? ': ' + refused : ''}. No publication.`);
+  }
+  /** Log the repeat count of the unlogged identical checks, named by the last of them. @returns {void} */
+  function flushRepeats() {
+    if (repeats) note(`${section.name} View More check ${lastRepeat}: same result repeated ${repeats} more times.`);
+    repeats = 0;
+  }
+  /** Record one View More link check. Poll checks equal to the previous one are only counted. @param {object} state UI state. @param {boolean} preClick Check made just before a click. @returns {void} */
+  function checkLink(state, preClick = false) {
+    if (!state.buttons) return;
+    checks++;
+    const facts = `visible ${state.visibleButtons}/${state.buttons}, ${linkFacts(state)}`;
+    const label = `${checks} (${preClick ? `pre-click ${clicks}` : clicks ? `after click ${clicks}` : 'before click 1'})`;
+    if (!preClick && facts === lastFacts) { repeats++; lastRepeat = label; return; }
+    flushRepeats(); lastFacts = facts;
+    note(`${section.name} View More check ${label}: ${facts}.`);
   }
   page.on('response', onResponse);
   try {
     const response = await page.goto(section.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     if (!response?.ok()) throw new Error(`Collection refused: HTTP ${response?.status() ?? 'unknown'}${await refusalShape(response)}.`);
-    let previous = 0, clicks = 0, expectGrowth = false;
+    let previous = 0, expectGrowth = false;
     while (true) {
       let state;
       for (let elapsed = 0; ; elapsed += pollMs) {
         state = await uiState(page);
-        if (refused || state.refusal) throw new Error('Collection refused by retailer. No publication.');
+        stopIfRefused(state);
+        checkLink(state);
         if (state.grids > 1) throw new Error('Unexpected product grid markup.');
         if (state.grids === 1 && !state.busy && state.cards === 0) throw new Error('Empty captured section.');
         const settled = state.grids === 1 && !state.busy && state.cards > 0 && (!expectGrowth || state.cards > previous);
         if (settled && (state.buttons === 0 || state.enabled)) break;
-        if (elapsed >= timeoutMs) throw new Error(state.grids === 1 && state.cards === 0 ? 'Empty captured section.' : `Incomplete expansion or stalled loading (cards ${state.cards}, busy ${state.busy}, View More ${state.visibleButtons}/${state.buttons} visible).`);
+        if (elapsed >= timeoutMs) throw new Error(state.grids === 1 && state.cards === 0 ? 'Empty captured section.' : `Incomplete expansion or stalled loading (cards ${state.cards}, busy ${state.busy}, View More ${state.visibleButtons}/${state.buttons} visible, link ${linkFacts(state)}; ${clicks ? `after click ${clicks} of View More` : 'before the first View More click'}).`);
         await page.waitForTimeout(pollMs);
       }
       if (state.cards < previous) throw new Error('Incomplete expansion: grid shrank.');
       if (state.buttons === 0) {
         await page.waitForTimeout(paceMs);
         const final = await uiState(page);
-        if (refused || final.refusal) throw new Error('Collection refused by retailer. No publication.');
+        stopIfRefused(final);
         if (final.grids !== 1 || final.busy || final.buttons !== 0 || final.cards !== state.cards) throw new Error('Incomplete expansion: grid did not settle.');
         if (!Number.isInteger(final.total) || final.cards !== final.total) throw new Error(`Incomplete section: ${final.cards} of ${final.total ?? 'unknown'} products loaded.`);
-        return await page.locator(GRID).evaluate(el => el.outerHTML);
+        const html = await page.locator(GRID).evaluate(el => el.outerHTML);
+        flushRepeats();
+        note(`${section.name} complete: ${final.cards} of ${final.total} products after ${clicks} View More clicks.`);
+        return html;
       }
       if (state.buttons !== 1 || state.visibleButtons !== 1 || !state.enabled || clicks >= maxClicks) throw new Error('Incomplete expansion: View More is unavailable or limit reached.');
       previous = state.cards; expectGrowth = true; clicks++;
       await page.waitForTimeout(paceMs);
       const beforeClick = await uiState(page);
-      if (refused || beforeClick.refusal) throw new Error('Collection refused by retailer. No publication.');
+      stopIfRefused(beforeClick);
+      checkLink(beforeClick, true);
       if (beforeClick.busy || beforeClick.grids !== 1 || beforeClick.cards !== previous || beforeClick.buttons !== 1 || beforeClick.visibleButtons !== 1 || !beforeClick.enabled) throw new Error('Incomplete expansion: UI changed before View More.');
+      note(`${section.name} View More click ${clicks} at ${previous} cards.`);
       await page.locator(VIEW_MORE).click({ timeout: timeoutMs });
     }
-  } finally { page.off('response', onResponse); }
+  } finally { flushRepeats(); page.off('response', onResponse); }
 }

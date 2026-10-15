@@ -115,7 +115,7 @@ export async function runDaily(options, overrides = {}) {
       try {
         const page = await context.newPage();
         emit(`${section.name} page load at ${new Date().toISOString()} in a fresh browser context.`);
-        html = await r.capture(page, section);
+        html = await r.capture(page, section, { log: emit });
       } finally { await context.close().catch(() => {}); }
       capturedAt = r.now().toISOString();
       const stem = section.name.toLowerCase();

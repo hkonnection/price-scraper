@@ -125,6 +125,14 @@ test('each section loads in its own fresh browser context, closed before a named
   assert.deepEqual(f.logs.filter(line => / page load at \d{4}-\d{2}-\d{2}T/.test(line)).map(line => line.split(' ')[0]), ['Women', 'Men', 'Accessories']);
 });
 
+test('the collector receives the run.log writer so expansion detail lands in run.log', async () => {
+  const f = fixture(); const capture = f.runtime.capture;
+  f.runtime.capture = async (page, section, settings) => { settings.log(`${section.name} View More click 1 at 40 cards.`); return capture(page, section); };
+  const result = await runDaily({ outputDir: f.outputDir, publish: false, priorFiles: [] }, f.runtime);
+  const runLog = fs.readFileSync(path.join(result.directory, 'run.log'), 'utf8');
+  for (const name of ['Women', 'Men', 'Accessories']) assert.match(runLog, new RegExp(`^${name} View More click 1 at 40 cards\\.$`, 'm'));
+});
+
 test('a refused first section stops before any pause, second context or publication', async () => {
   const f = fixture();
   f.runtime.capture = async (page, section) => { f.visits.push(section.name); throw new Error('Collection refused: HTTP 400.'); };
