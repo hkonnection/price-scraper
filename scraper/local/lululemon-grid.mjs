@@ -139,6 +139,18 @@ export function classifyUiState(raw) {
 }
 
 
+/** Describe a refused page load by its request cookie count and size and the responding server, never by any cookie or header value beyond the server name. Best effort only.
+ * @param {import('playwright').Response|null} response Refused document response.
+ * @returns {Promise<string>} Parenthesized detail, or empty when the browser exposes none.
+ */
+export async function refusalShape(response) {
+  try {
+    const cookie = (await response.request().allHeaders()).cookie || '';
+    const server = String(response.headers().server || '').replace(/[^\w ./-]/g, '').slice(0, 40) || 'unknown';
+    return ` (request cookies ${cookie ? cookie.split(';').length : 0}, ${Buffer.byteLength(cookie)} bytes; server ${server})`;
+  } catch { return ''; }
+}
+
 /** Visit once, expand with paced ordinary clicks, and return only grid outerHTML. Never retry retailer requests. @param {import('playwright').Page} page Headed Chrome page. @param {object} section Official section. @param {object} settings Bounded waits, overridable for offline tests only. @returns {Promise<string>} Complete grid HTML. @throws {Error} On refusal, empty/missing grid, stalled loading or expansion. */
 export async function collectSection(page, section, settings = {}) {
   const { paceMs = 1200, pollMs = 250, timeoutMs = 30000, maxClicks = 200 } = settings;
@@ -150,7 +162,7 @@ export async function collectSection(page, section, settings = {}) {
   page.on('response', onResponse);
   try {
     const response = await page.goto(section.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    if (!response?.ok()) throw new Error(`Collection refused: HTTP ${response?.status() ?? 'unknown'}.`);
+    if (!response?.ok()) throw new Error(`Collection refused: HTTP ${response?.status() ?? 'unknown'}${await refusalShape(response)}.`);
     let previous = 0, clicks = 0, expectGrowth = false;
     while (true) {
       let state;

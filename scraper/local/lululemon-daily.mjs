@@ -15,6 +15,8 @@ import { loadDeals } from './publish-lululemon.mjs';
 const SCRIPT = fileURLToPath(import.meta.url);
 const ROOT = path.resolve(path.dirname(SCRIPT), '../..');
 const WORKFLOW = path.join(ROOT, '.github/workflows/publish-lululemon.yml');
+/** Wait between one section's last request and the next section's page load. A section page load that directly followed another section's requests in the same browser session got HTTP 400 (2026-10-08, 2026-10-14 twice); every first load in a fresh browser succeeded. */
+export const SECTION_PAUSE_MS = 3 * 60 * 1000;
 
 /** Reject ambiguous or non-normalized private paths. @param {string} value Path. @returns {string} Validated path. @throws {Error} On unsafe path. */
 function absolutePath(value) {
@@ -75,10 +77,11 @@ function github(args) {
     env: { HOME: os.homedir(), PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:' + path.join(os.homedir(), '.local', 'bin') }, timeout: 120000 });
 }
 
-/** Capture a complete set under an exclusive local lock, validate with the saved publisher, then upload/dispatch exactly once. @param {object} options Validated options. @param {object} overrides Offline dependency injection, not CLI flags. @returns {Promise<object>} Saved set and dispatch details. @throws {Error} On any incomplete capture, unsafe state or uncertain remote operation; never retries. */
+/** Capture a complete set under an exclusive local lock, each section in its own fresh browser context with SECTION_PAUSE_MS between sections, validate with the saved publisher, then upload/dispatch exactly once. @param {object} options Validated options. @param {object} overrides Offline dependency injection (including sleep), not CLI flags. @returns {Promise<object>} Saved set and dispatch details. @throws {Error} On any incomplete capture, unsafe state or uncertain remote operation; never retries. */
 export async function runDaily(options, overrides = {}) {
   const r = { now: () => new Date(), platform: process.platform, uid: process.getuid?.(), capture: collectSection,
-    launch: async settings => (await import('playwright')).chromium.launch(settings), github, emit: console.log, ...overrides };
+    launch: async settings => (await import('playwright')).chromium.launch(settings), github, emit: console.log,
+    sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), ...overrides };
   if (!options || typeof options.publish !== 'boolean' || !Array.isArray(options.priorFiles)) throw new Error('Invalid daily command options.');
   const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Vancouver', year: 'numeric', month: '2-digit', day: '2-digit' }).format(r.now());
   if (day < '2026-10-11') throw new Error('Daily collection cannot start before October 11, 2026, Pacific time.');
@@ -103,10 +106,17 @@ export async function runDaily(options, overrides = {}) {
     function emit(text) { fs.writeSync(log, text + '\n'); r.emit(text); }
     emit(`Started ${r.now().toISOString()} ordinary headed Chrome; counts are observed cards, not advertised coverage.`);
     browser = await r.launch({ channel: 'chrome', headless: false });
-    const page = await browser.newPage();
     const captures = []; let capturedAt;
-    for (const section of SECTIONS) {
-      const html = await r.capture(page, section);
+    for (const [index, section] of SECTIONS.entries()) {
+      if (index) { emit(`Pausing ${SECTION_PAUSE_MS / 1000} s before ${section.name}.`); await r.sleep(SECTION_PAUSE_MS); }
+      // Fresh context per section: no cookies, cache or open page carried over from the previous section.
+      const context = await browser.newContext();
+      let html;
+      try {
+        const page = await context.newPage();
+        emit(`${section.name} page load at ${new Date().toISOString()} in a fresh browser context.`);
+        html = await r.capture(page, section);
+      } finally { await context.close().catch(() => {}); }
       capturedAt = r.now().toISOString();
       const stem = section.name.toLowerCase();
       save(path.join(directory, 'raw', stem + '.html'), html);

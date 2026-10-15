@@ -124,6 +124,21 @@ test('collector stops for refusal, HTTP rejection, empty grid, ambiguous markup 
   ]) await assert.rejects(collectSection(fakePage(states, status), SECTIONS[0], settings), expected);
 });
 
+test('a non-OK section page load reports status, request cookie count and size and edge server, never a cookie value', async () => {
+  const settings = { paceMs: 0, pollMs: 1, timeoutMs: 2 };
+  const page = fakePage([initial], 400); const goto = page.goto;
+  page.goto = async url => ({ ...(await goto(url)), headers: () => ({ server: 'AkamaiGHost', 'set-cookie': 'secretthree=1' }),
+    request: () => ({ allHeaders: async () => ({ cookie: 'a=secretone; b=secrettwo; c=x' }) }) });
+  const error = await collectSection(page, SECTIONS[1], settings).catch(caught => caught);
+  assert.equal(error.message, 'Collection refused: HTTP 400 (request cookies 3, 29 bytes; server AkamaiGHost).');
+  assert.doesNotMatch(error.message, /secret/);
+  assert.deepEqual(page.trace, [SECTIONS[1].url]);
+  const bare = fakePage([initial], 400); const bareGoto = bare.goto;
+  bare.goto = async url => ({ ...(await bareGoto(url)), headers: () => ({}), request: () => ({ allHeaders: async () => ({}) }) });
+  await assert.rejects(collectSection(bare, SECTIONS[1], settings), { message: 'Collection refused: HTTP 400 (request cookies 0, 0 bytes; server unknown).' });
+  await assert.rejects(collectSection(fakePage([initial], 400), SECTIONS[1], settings), { message: 'Collection refused: HTTP 400.' });
+});
+
 test('permanent product image carousel progress bars are not loading, but any other visible indicator is', () => {
   const carousels = Array.from({ length: 6 }, () => ({ carousel: true }));
   assert.equal(classifyUiState({ ...initial, indicators: carousels }).busy, false);

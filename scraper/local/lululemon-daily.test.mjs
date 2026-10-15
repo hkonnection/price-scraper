@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import { parseArgs, runDaily } from './lululemon-daily.mjs';
+import { parseArgs, runDaily, SECTION_PAUSE_MS } from './lululemon-daily.mjs';
 import { loadDeals, main as savedMain } from './publish-lululemon.mjs';
 import { SECTIONS } from './lululemon-grid.mjs';
 
@@ -15,11 +15,13 @@ const at = '2026-10-11T15:02:03.456Z';
 function fixture(changes = {}) {
   fs.mkdirSync(artifacts, { recursive: true, mode: 0o700 });
   const outputDir = fs.mkdtempSync(path.join(artifacts, 'daily-'));
-  const calls = [], visits = [], logs = [];
-  const browser = { newPage: async () => ({}), close: async () => { calls.push(['close']); } };
+  const calls = [], visits = [], logs = []; let contexts = 0;
+  const browser = { close: async () => { calls.push(['close']); },
+    newContext: async () => { const id = ++contexts; calls.push(['context', id]); return { newPage: async () => ({ context: id }), close: async () => { calls.push(['context-close', id]); } }; } };
   const runtime = { now: () => new Date(at), platform: 'darwin', uid: process.getuid(), workflowText: 'on:\n  workflow_dispatch:\n    inputs:\n      captured_at:\n        type: string\n', emit: line => logs.push(line),
     launch: async options => { calls.push(['launch', options]); return browser; },
-    capture: async (page, section) => { visits.push(section.name); return `<div data-testid="product-grid"><div data-testid="product-tile"><a href="/p/test/same">${section.name === 'Accessories' ? 'Bag' : 'Unknown'}</a><span class="originalPrice">$100</span>$50</div></div>`; },
+    sleep: async ms => { calls.push(['sleep', ms]); },
+    capture: async (page, section) => { visits.push(section.name); calls.push(['capture', section.name, page.context]); return `<div data-testid="product-grid"><div data-testid="product-tile"><a href="/p/test/same">${section.name === 'Accessories' ? 'Bag' : 'Unknown'}</a><span class="originalPrice">$100</span>$50</div></div>`; },
     github: async args => { calls.push(args); return { status: 0 }; },
     ...changes,
   };
@@ -110,6 +112,28 @@ test('backwards capture clock prevents release upload or dispatch', async () => 
   assert.equal(f.calls.some(c => ['release', 'workflow'].includes(c[0])), false);
 });
 
+test('each section loads in its own fresh browser context, closed before a named pause of a few minutes', async () => {
+  assert.equal(SECTION_PAUSE_MS, 180000);
+  const f = fixture();
+  await runDaily({ outputDir: f.outputDir, publish: false, priorFiles: [] }, f.runtime);
+  assert.deepEqual(f.calls.filter(c => c[0] !== 'launch'), [
+    ['context', 1], ['capture', 'Women', 1], ['context-close', 1], ['sleep', SECTION_PAUSE_MS],
+    ['context', 2], ['capture', 'Men', 2], ['context-close', 2], ['sleep', SECTION_PAUSE_MS],
+    ['context', 3], ['capture', 'Accessories', 3], ['context-close', 3], ['close'],
+  ]);
+  assert.equal(f.logs.filter(line => /^Pausing 180 s before (Men|Accessories)\.$/.test(line)).length, 2);
+  assert.deepEqual(f.logs.filter(line => / page load at \d{4}-\d{2}-\d{2}T/.test(line)).map(line => line.split(' ')[0]), ['Women', 'Men', 'Accessories']);
+});
+
+test('a refused first section stops before any pause, second context or publication', async () => {
+  const f = fixture();
+  f.runtime.capture = async (page, section) => { f.visits.push(section.name); throw new Error('Collection refused: HTTP 400.'); };
+  await assert.rejects(runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime), /HTTP 400/);
+  assert.deepEqual(f.visits, ['Women']);
+  assert.deepEqual(f.calls.filter(c => c[0] !== 'launch'), [['context', 1], ['context-close', 1], ['close']]);
+  assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
+});
+
 test('dry-run captures locally but never contacts GitHub or D1', async () => {
   const f = fixture(); const result = await runDaily({ outputDir: f.outputDir, publish: false, priorFiles: [] }, f.runtime);
   assert.equal(result.payload.deals.length, 1); assert.equal(f.calls.some(c => ['release', 'workflow'].includes(c[0])), false);
@@ -130,6 +154,8 @@ test('first refusal, missing/empty capture, malformed data and stalled expansion
     };
     await assert.rejects(runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime));
     assert.deepEqual(f.visits, ['Women', 'Men']); assert.equal(f.calls.some(c => ['release', 'workflow'].includes(c[0])), false);
+    assert.deepEqual(f.calls.filter(c => c[0] === 'sleep'), [['sleep', SECTION_PAUSE_MS]], 'no pause or third section after the first failure');
+    assert.deepEqual(f.calls.filter(c => c[0] === 'context-close'), [['context-close', 1], ['context-close', 2]]);
     assert.equal(f.calls.filter(c => c[0] === 'close').length, 1); assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
     const folder = fs.readdirSync(f.outputDir).find(n => n.startsWith('capture-'));
     assert.equal(fs.existsSync(path.join(f.outputDir, folder, 'publish', 'combined.json')), false);
