@@ -132,6 +132,7 @@ export function readUiFacts() {
     return { grids: grids.length, cards: grids[0]?.querySelectorAll('[data-testid="product-tile"]').length || 0,
       total: pageTotal(), buttons: buttons.length, visibleButtons: shown.length, enabled: shown.length === 1 && !shown[0].disabled && shown[0].getAttribute('aria-disabled') !== 'true',
       link: shown.length === 1 ? { disabled: Boolean(shown[0].disabled), ariaDisabled: shown[0].getAttribute('aria-disabled') } : null,
+      timeOrigin: performance.timeOrigin,
       indicators: [...document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [data-testid*="loading"]')].filter(visible).map(el => ({ carousel: Boolean(el.closest('[class*="carousel"]')) })),
       refusal: refusalText.test(document.title + ' ' + document.body.innerText) };
 }
@@ -164,11 +165,22 @@ function linkFacts(state) {
 /** Keep only a URL's path for logs: no query, fragment, host or control characters. @param {URL} url Parsed URL. @returns {string} Bounded path. */
 function logPath(url) { return url.pathname.replace(/[\x00-\x20\x7f]/g, '').slice(0, 200); }
 
+/** Keep a page URL's path and numeric page parameter for logs, never other query values. @param {string} href URL. @returns {string} Bounded path, `?page=N` and a note when other query keys were dropped. */
+function pageAt(href) {
+  try {
+    const url = new URL(href), number = url.searchParams.get('page');
+    const other = [...url.searchParams.keys()].some(key => key !== 'page');
+    return logPath(url) + (/^\d+$/.test(number || '') ? `?page=${number}` : '') + (other ? ' (other query omitted)' : '');
+  } catch { return 'unknown'; }
+}
+
 /** Name the product-data request path a section's View More click fires. @param {object} section Official section. @returns {string} Category endpoint path for the section URL's category id. */
 export function productDataPath(section) { return PRODUCT_DATA_PATH + new URL(section.url).pathname.split('/').pop(); }
 
 /** Visit once, expand with paced ordinary clicks, and return only grid outerHTML. Never retry retailer requests.
  * Logs each View More click, each View More link check (identical consecutive poll results are counted, not repeated) and the status and path of every retailer XHR after a click.
+ * After each click it also logs what the page did: URL and card count before and after, whether the document stayed the same (performance.timeOrigin),
+ * main-frame navigations, load and DOMContentLoaded events, main-frame document responses, and request counts by type.
  * A 4xx on the section's product-data request after a click is a refusal; other XHR statuses are only logged. 401, 403 and 429 from any retailer resource still refuse.
  * @param {import('playwright').Page} page Headed Chrome page.
  * @param {object} section Official section.
@@ -179,21 +191,40 @@ export function productDataPath(section) { return PRODUCT_DATA_PATH + new URL(se
 export async function collectSection(page, section, settings = {}) {
   const { paceMs = 1200, pollMs = 250, timeoutMs = 30000, maxClicks = 200, log = () => {} } = settings;
   const dataPath = productDataPath(section);
-  let refused = null, clicks = 0, checks = 0, lastFacts = null, repeats = 0, lastRepeat = '';
+  let refused = null, clicks = 0, checks = 0, lastFacts = null, repeats = 0, lastRepeat = '', after = null, lastState = null;
   /** Write one diagnostic line without letting a logging failure replace the collector's own outcome. @param {string} line Diagnostic. @returns {void} */
   function note(line) { try { log(line); } catch { /* Diagnostics are best effort. */ } }
   /** Detect refusal responses without inspecting bodies; record status and path of retailer XHRs after a click, marking the product-data request. @param {object} response Browser response. @returns {void} */
   function onResponse(response) {
     const url = new URL(response.url());
-    if (url.hostname !== 'shop.lululemon.com') return;
-    const status = response.status();
     let type = '';
     try { type = response.request().resourceType(); } catch { /* Unknown type is not an XHR. */ }
+    if (after) { if (url.hostname === 'shop.lululemon.com') after.retailer[type || 'other'] = (after.retailer[type || 'other'] || 0) + 1; else after.otherHosts++; }
+    if (url.hostname !== 'shop.lululemon.com') return;
+    const status = response.status();
+    if (clicks > 0 && type === 'document') note(`${section.name} document after click ${clicks}: HTTP ${status} ${pageAt(url.href)}`);
     const call = clicks > 0 && (type === 'xhr' || type === 'fetch');
     const productData = call && url.pathname === dataPath;
     if (call) note(`${section.name} ${productData ? 'product-data ' : ''}XHR after click ${clicks}: HTTP ${status} ${logPath(url)}`);
     if (!refused && productData && status >= 400 && status < 500) refused = `View More product-data request HTTP ${status} ${logPath(url)}`;
     else if (!refused && [401, 403, 429].includes(status)) refused = `HTTP ${status} ${logPath(url)}`;
+  }
+  /** Count main-frame navigations after a click. @param {object} frame Navigated frame. @returns {void} */
+  function onNavigated(frame) { try { if (after && !frame.parentFrame()) after.navigations++; } catch { /* Unknown frame is not counted. */ } }
+  /** Count page load events after a click. @returns {void} */
+  function onLoad() { if (after) after.loads++; }
+  /** Count DOMContentLoaded events after a click. @returns {void} */
+  function onContentLoaded() { if (after) after.contentLoads++; }
+  /** Read the page URL for logs. @returns {string} Sanitized path or unknown. */
+  function currentAt() { try { return pageAt(page.url()); } catch { return 'unknown'; } }
+  /** Log what the page did since the last click, once per click. @param {object|null} state Latest UI state. @returns {void} */
+  function reportAfterClick(state) {
+    if (!after) return;
+    const a = after; after = null;
+    flushRepeats();
+    const document = state?.timeOrigin == null || a.timeOrigin == null ? 'unknown' : state.timeOrigin === a.timeOrigin ? 'same (timeOrigin unchanged)' : 'new (timeOrigin changed)';
+    const requests = Object.entries(a.retailer).map(([type, count]) => `${type} ${count}`).join(', ') || 'none';
+    note(`${section.name} after click ${a.click}: URL ${a.url} → ${currentAt()}, cards ${a.cards} → ${state?.cards ?? 'unknown'}, document ${document}, main-frame navigations ${a.navigations}, load events ${a.loads}, DOMContentLoaded ${a.contentLoads}, retailer requests ${requests}, other-host requests ${a.otherHosts}.`);
   }
   /** Stop on a recorded refusal response or refusal page text. @param {object} state UI state. @returns {void} @throws {Error} On refusal. */
   function stopIfRefused(state) {
@@ -209,12 +240,12 @@ export async function collectSection(page, section, settings = {}) {
     if (!state.buttons) return;
     checks++;
     const facts = `visible ${state.visibleButtons}/${state.buttons}, ${linkFacts(state)}`;
-    const label = `${checks} (${preClick ? `pre-click ${clicks}` : clicks ? `after click ${clicks}` : 'before click 1'})`;
+    const label = `${checks} (${preClick ? `pre-click ${clicks + 1}` : clicks ? `after click ${clicks}` : 'before click 1'})`;
     if (!preClick && facts === lastFacts) { repeats++; lastRepeat = label; return; }
     flushRepeats(); lastFacts = facts;
     note(`${section.name} View More check ${label}: ${facts}.`);
   }
-  page.on('response', onResponse);
+  page.on('response', onResponse); page.on('framenavigated', onNavigated); page.on('load', onLoad); page.on('domcontentloaded', onContentLoaded);
   try {
     const response = await page.goto(section.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     if (!response?.ok()) throw new Error(`Collection refused: HTTP ${response?.status() ?? 'unknown'}${await refusalShape(response)}.`);
@@ -222,7 +253,7 @@ export async function collectSection(page, section, settings = {}) {
     while (true) {
       let state;
       for (let elapsed = 0; ; elapsed += pollMs) {
-        state = await uiState(page);
+        state = lastState = await uiState(page);
         stopIfRefused(state);
         checkLink(state);
         if (state.grids > 1) throw new Error('Unexpected product grid markup.');
@@ -232,6 +263,7 @@ export async function collectSection(page, section, settings = {}) {
         if (elapsed >= timeoutMs) throw new Error(state.grids === 1 && state.cards === 0 ? 'Empty captured section.' : `Incomplete expansion or stalled loading (cards ${state.cards}, busy ${state.busy}, View More ${state.visibleButtons}/${state.buttons} visible, link ${linkFacts(state)}; ${clicks ? `after click ${clicks} of View More` : 'before the first View More click'}).`);
         await page.waitForTimeout(pollMs);
       }
+      reportAfterClick(state);
       if (state.cards < previous) throw new Error('Incomplete expansion: grid shrank.');
       if (state.buttons === 0) {
         await page.waitForTimeout(paceMs);
@@ -245,14 +277,19 @@ export async function collectSection(page, section, settings = {}) {
         return html;
       }
       if (state.buttons !== 1 || state.visibleButtons !== 1 || !state.enabled || clicks >= maxClicks) throw new Error('Incomplete expansion: View More is unavailable or limit reached.');
-      previous = state.cards; expectGrowth = true; clicks++;
+      previous = state.cards; expectGrowth = true;
       await page.waitForTimeout(paceMs);
       const beforeClick = await uiState(page);
       stopIfRefused(beforeClick);
       checkLink(beforeClick, true);
       if (beforeClick.busy || beforeClick.grids !== 1 || beforeClick.cards !== previous || beforeClick.buttons !== 1 || beforeClick.visibleButtons !== 1 || !beforeClick.enabled) throw new Error('Incomplete expansion: UI changed before View More.');
+      clicks++;
       note(`${section.name} View More click ${clicks} at ${previous} cards.`);
+      after = { click: clicks, url: currentAt(), cards: beforeClick.cards, timeOrigin: beforeClick.timeOrigin, navigations: 0, loads: 0, contentLoads: 0, retailer: {}, otherHosts: 0 };
       await page.locator(VIEW_MORE).click({ timeout: timeoutMs });
     }
-  } finally { flushRepeats(); page.off('response', onResponse); }
+  } finally {
+    reportAfterClick(lastState); flushRepeats();
+    page.off('response', onResponse); page.off('framenavigated', onNavigated); page.off('load', onLoad); page.off('domcontentloaded', onContentLoaded);
+  }
 }

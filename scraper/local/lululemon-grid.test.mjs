@@ -81,7 +81,7 @@ test('valid later capture with no new products is accepted but missing/empty/mal
 function fakePage(states, status = 200) {
   let index = 0, clicked = false;
   const trace = [], handlers = {};
-  return { trace, on: (event, fn) => { handlers[event] = fn; }, off: () => {},
+  return { trace, on: (event, fn) => { handlers[event] = fn; }, off: () => {}, url: () => trace[0] ?? 'about:blank',
     goto: async url => { trace.push(url); return { status: () => status, ok: () => status === 200 }; },
     evaluate: async () => { const result = states[index]; if (clicked && index < states.length - 1) index++; return result; },
     waitForTimeout: async () => {},
@@ -101,7 +101,7 @@ const complete = { ...initial, cards: 2, buttons: 0, visibleButtons: 0 };
 
 test('HTTP 429 resource refusal halts before clicking without reading any network body', async () => {
   const page = fakePage([initial]); let listener;
-  page.on = (event, fn) => { listener = fn; };
+  page.on = (event, fn) => { if (event === 'response') listener = fn; };
   page.waitForTimeout = async () => { listener({ url: () => 'https://shop.lululemon.com/refused-resource', status: () => 429 }); };
   await assert.rejects(collectSection(page, SECTIONS[0], { paceMs: 1, pollMs: 1, timeoutMs: 3 }), /refus/i);
   assert.deepEqual(page.trace, [SECTIONS[0].url]);
@@ -144,7 +144,7 @@ function response(url, status, type = 'xhr') { return { url: () => url, status: 
 /** Make a page whose View More click delivers the given responses to the collector's listener. @param {object[]} states UI states. @param {object[]} afterClick Responses fired on click. @param {object[]} beforeClick Responses fired on load. @returns {object} Page double. */
 function clickingPage(states, afterClick, beforeClick = []) {
   const page = fakePage(states); let listener;
-  page.on = (event, fn) => { listener = fn; };
+  page.on = (event, fn) => { if (event === 'response') listener = fn; };
   const goto = page.goto; page.goto = async url => { const result = await goto(url); beforeClick.forEach(r => listener(r)); return result; };
   const locator = page.locator; page.locator = selector => { const real = locator(selector); return { ...real, click: async () => { await real.click(); afterClick.forEach(r => listener(r)); } }; };
   return page;
@@ -175,9 +175,11 @@ test('a repeat count names the last repeated check and the click it followed, ev
     'Women View More check 2 (pre-click 1): visible 1/1, disabled false, aria-disabled none, enabled true.',
     'Women View More click 1 at 1 cards.',
     repeat1,
+    `Women after click 1: URL ${WOMEN_PATH} → ${WOMEN_PATH}, cards 1 → 2, document unknown, main-frame navigations 0, load events 0, DOMContentLoaded 0, retailer requests none, other-host requests 0.`,
     'Women View More check 7 (pre-click 2): visible 1/1, disabled false, aria-disabled none, enabled true.',
     'Women View More click 2 at 2 cards.',
     'Women View More check 8 (after click 2): same result repeated 1 more times.',
+    `Women after click 2: URL ${WOMEN_PATH} → ${WOMEN_PATH}, cards 2 → 3, document unknown, main-frame navigations 0, load events 0, DOMContentLoaded 0, retailer requests none, other-host requests 0.`,
     'Women complete: 3 of 3 products after 2 View More clicks.',
   ]);
 });
@@ -246,6 +248,55 @@ test('401, 403 and 429 from any retailer resource still refuse, before or after 
   }
 });
 
+const WOMEN_PATH = '/en-ca/c/women-we-made-too-much/n16o10z8mhd';
+const WOMEN_DATA = 'https://shop.lululemon.com/.uf-svc/v1/categories/n16o10z8mhd?page%5Blimit%5D=40&page%5Boffset%5D=40';
+/** Make a page that records every event listener and runs a scripted reaction when View More is clicked. @param {object[]} states UI states. @param {Function} onClick Receives (emit, page) on click. @returns {object} Page double. */
+function scriptedPage(states, onClick) {
+  const page = fakePage(states); const listeners = {};
+  page.on = (event, fn) => { (listeners[event] ||= []).push(fn); };
+  /** Deliver one event to its listeners. @param {string} event Event. @param {*} value Payload. @returns {void} */
+  const emit = (event, value) => (listeners[event] || []).forEach(fn => fn(value));
+  const locator = page.locator;
+  page.locator = selector => { const real = locator(selector); return { ...real, click: async () => { await real.click(); onClick(emit, page); } }; };
+  return page;
+}
+
+test('after each click run.log reports URL, cards, document identity, navigation and load events and request counts (in-page growth)', async () => {
+  const log = [];
+  const page = scriptedPage([{ ...initial, timeOrigin: 7 }, { ...complete, timeOrigin: 7 }], emit => {
+    emit('response', response(WOMEN_DATA, 200)); emit('response', response('https://shop.lululemon.com/metrics/ca/ga/g/c', 204, 'fetch'));
+    emit('response', response('https://images.lululemon.com/x.jpg', 200, 'image'));
+  });
+  await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) });
+  assert.ok(log.includes(`Women after click 1: URL ${WOMEN_PATH} → ${WOMEN_PATH}, cards 1 → 2, document same (timeOrigin unchanged), main-frame navigations 0, load events 0, DOMContentLoaded 0, retailer requests xhr 1, fetch 1, other-host requests 1.`), log.join('\n'));
+  assert.ok(log.indexOf('Women View More click 1 at 1 cards.') < log.findIndex(line => line.startsWith('Women after click 1:')));
+});
+
+test('a click that loads a new document is reported as a navigation with the URL change, and the stall still stops the run', async () => {
+  const log = []; let url = 'https://shop.lululemon.com' + WOMEN_PATH;
+  const page = scriptedPage([{ ...initial, timeOrigin: 7 }, { ...initial, timeOrigin: 9 }], (emit, p) => {
+    url = `https://shop.lululemon.com${WOMEN_PATH}?page=2&utm_token=secretvalue`; p.url = () => url;
+    emit('response', response(url, 200, 'document')); emit('framenavigated', { parentFrame: () => null }); emit('framenavigated', { parentFrame: () => ({}) });
+    emit('domcontentloaded'); emit('load'); emit('response', response('https://shop.lululemon.com/api/graphql', 200));
+  });
+  page.url = () => url;
+  const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 4, log: line => log.push(line) }).catch(caught => caught);
+  assert.match(error.message, /^Incomplete expansion or stalled loading \(cards 1, .*after click 1 of View More\)\.$/);
+  assert.ok(log.includes(`Women document after click 1: HTTP 200 ${WOMEN_PATH}?page=2 (other query omitted)`), log.join('\n'));
+  assert.ok(log.includes(`Women after click 1: URL ${WOMEN_PATH} → ${WOMEN_PATH}?page=2 (other query omitted), cards 1 → 1, document new (timeOrigin changed), main-frame navigations 1, load events 1, DOMContentLoaded 1, retailer requests document 1, xhr 1, other-host requests 0.`), log.join('\n'));
+  assert.doesNotMatch(log.join('\n'), /secret|utm/);
+});
+
+test('requests during the pause before a click are not labelled as after that click', async () => {
+  const log = []; let listener, fired = false;
+  const page = fakePage([initial, complete, complete]);
+  page.on = (event, fn) => { if (event === 'response') listener = fn; };
+  page.waitForTimeout = async () => { if (!fired) { fired = true; listener(response('https://shop.lululemon.com/akam/13/pixel_x', 200)); } };
+  await collectSection(page, SECTIONS[0], { paceMs: 1, pollMs: 1, timeoutMs: 50, log: line => log.push(line) });
+  assert.ok(!log.some(line => line.includes('/akam/')), log.join('\n'));
+  assert.ok(log.includes('Women View More click 1 at 1 cards.'));
+});
+
 test('the browser-side reader reports the View More link disabled and aria-disabled attributes', () => {
   const saved = { document: globalThis.document, getComputedStyle: globalThis.getComputedStyle };
   /** Make a visible element double. @param {object} extra Fields. @returns {object} Element. */
@@ -257,6 +308,7 @@ test('the browser-side reader reports the View More link disabled and aria-disab
       querySelectorAll: selector => (selector.includes('view_more') ? [link] : selector.includes('product-grid') ? [element()] : []) };
     const facts = readUiFacts();
     assert.deepEqual(facts.link, { disabled: false, ariaDisabled: 'true' });
+    assert.equal(facts.timeOrigin, performance.timeOrigin);
     assert.equal(facts.enabled, false);
   } finally { Object.assign(globalThis, saved); }
 });
