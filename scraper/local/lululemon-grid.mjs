@@ -42,6 +42,23 @@ function retain(keep, row) {
   return false;
 }
 
+/** Read a tile's product link: the first product anchor with text, its name, href and store product id (code). @param {Function} $ Cheerio root. @param {object} tile Cheerio tile. @returns {object} Name, href and code (undefined when absent). */
+function tileProduct($, tile) {
+  const anchor = tile.find('a[href*="/p/"]').toArray().find(a => $(a).text().trim());
+  const name = anchor ? $(anchor).text().trim() : '';
+  const href = anchor ? $(anchor).attr('href') : '';
+  return { name, href, code: href?.match(/\/p\/[^/]+\/([^/?#]+)/)?.[1] };
+}
+
+/** Count a saved grid's cards and its distinct store product ids, read the same way parseGrid reads them. Repeated cards and tiles without a product id add no product.
+ * @param {string} html Grid outerHTML. @returns {object} `cards` (tiles) and `unique` (distinct product ids).
+ */
+export function gridProducts(html) {
+  const $ = cheerio.load(html);
+  const tiles = $(GRID).first().find(TILE).toArray();
+  return { cards: tiles.length, unique: new Set(tiles.map(element => tileProduct($, $(element)).code).filter(Boolean)).size };
+}
+
 /** Parse only tile descendants of one grid without executing markup or fetching resources. @param {string} html Grid outerHTML. @param {string} section Section name. @param {string} at Actual UTC timestamp. @param {Map<string,string>} prior Saved categories. @returns {object} Raw envelope and card accounting. @throws {Error} On missing/empty/unusable grids. */
 export function parseGrid(html, section, at, prior = new Map()) {
   validateCaptureTime(at);
@@ -54,10 +71,7 @@ export function parseGrid(html, section, at, prior = new Map()) {
   const keep = new Map();
   for (const element of tiles.toArray()) {
     const tile = $(element);
-    const anchor = tile.find('a[href*="/p/"]').toArray().find(a => $(a).text().trim());
-    const name = anchor ? $(anchor).text().trim() : '';
-    const href = anchor ? $(anchor).attr('href') : '';
-    const code = href?.match(/\/p\/[^/]+\/([^/?#]+)/)?.[1];
+    const { name, href, code } = tileProduct($, tile);
     const prices = (tile.text().replace(/\s+/g, ' ').match(/\$[\d,]+(?:\.\d+)?/g) || []).map(s => Number(s.replace(/[$,]/g, '')));
     const original = tile.find('[class*="originalPrice"]').first();
     const regular = original.length ? Number(original.text().replace(/[^\d.]/g, '')) : Math.max(...prices);
@@ -185,21 +199,22 @@ function pageAt(href) {
  * only source. After clicks it is the total reported by the last of the section's product-data responses (`data.attributes.totalCount`):
  * the embedded total is built before the page loads more products and can count items the product-data service no longer returns,
  * and the product-data total can move by an item or two during one session, so the latest one counts.
- * A missing or non-integer product-data total, or no product-data response at all, stops the section.
- * @param {number} cards Cards loaded. @param {number} clicks View More clicks made. @param {Array<number|null>} dataTotals Totals read from product-data responses in arrival order (null when unreadable).
+ * A missing or non-integer product-data total, or no product-data response at all, stops the section. Only distinct store product ids
+ * count toward the total: offset paging over a list that changes while it is read repeats some cards and skips other products.
+ * @param {object} products `cards` loaded and `unique` distinct product ids among them (gridProducts). @param {number} clicks View More clicks made. @param {Array<number|null>} dataTotals Totals read from product-data responses in arrival order (null when unreadable).
  * @param {number|null} pageTotal Embedded page total, for comparison. @returns {object} `total` to match and `note`, the totals seen for run.log. @throws {Error} When no trustworthy total exists or cards differ from it.
  */
-export function expectedTotal(cards, clicks, dataTotals, pageTotal) {
-  const shown = `page total ${pageTotal ?? 'unknown'}`;
+export function expectedTotal({ cards, unique }, clicks, dataTotals, pageTotal) {
+  const shown = `page total ${pageTotal ?? 'unknown'}`, counted = `${cards} cards, ${cards - unique} repeated`;
   if (!clicks) {
-    if (!Number.isInteger(pageTotal) || cards !== pageTotal) throw new Error(`Incomplete section: ${cards} of ${pageTotal ?? 'unknown'} products loaded.`);
+    if (!Number.isInteger(pageTotal) || unique !== pageTotal) throw new Error(`Incomplete section: ${unique} of ${pageTotal ?? 'unknown'} unique products loaded (${counted}).`);
     return { total: pageTotal, note: `page total, no product-data request; ${shown}` };
   }
   if (!dataTotals.length) throw new Error(`Incomplete section: no product-data response after ${clicks} View More clicks (${cards} cards loaded; ${shown}).`);
   if (dataTotals.some(total => !Number.isInteger(total))) throw new Error(`Incomplete section: a product-data response gave no product total (${cards} cards loaded; ${shown}).`);
   const total = dataTotals.at(-1);
   const note = `last product-data total; product-data totals seen ${[...new Set(dataTotals)].join(', ')} in ${dataTotals.length} responses; ${shown}`;
-  if (cards !== total) throw new Error(`Incomplete section: ${cards} of ${total} products loaded (${note}).`);
+  if (unique !== total) throw new Error(`Incomplete section: ${unique} of ${total} unique products loaded (${counted}; ${note}).`);
   return { total, note };
 }
 
@@ -307,10 +322,11 @@ export async function collectSection(page, section, settings = {}) {
         stopIfRefused(final);
         if (final.grids !== 1 || final.busy || final.buttons !== 0 || final.cards !== state.cards) throw new Error('Incomplete expansion: grid did not settle.');
         const totals = await Promise.all(dataTotals);
-        const expected = expectedTotal(final.cards, clicks, totals, final.total);
         const html = await page.locator(GRID).evaluate(el => el.outerHTML);
+        const products = gridProducts(html);
+        const expected = expectedTotal(products, clicks, totals, final.total);
         flushRepeats();
-        note(`${section.name} complete: ${final.cards} of ${expected.total} products after ${clicks} View More clicks (${expected.note}).`);
+        note(`${section.name} complete: ${products.unique} of ${expected.total} unique products (${products.cards} cards, ${products.cards - products.unique} repeated) after ${clicks} View More clicks (${expected.note}).`);
         return html;
       }
       if (state.buttons !== 1 || state.visibleButtons !== 1 || !clickable(state) || clicks >= maxClicks) throw new Error('Incomplete expansion: View More is unavailable or limit reached.');

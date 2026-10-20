@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseGrid, combineSections, collectSection, classifyUiState, readUiFacts, productDataPath, SECTIONS } from './lululemon-grid.mjs';
+import { parseGrid, combineSections, collectSection, classifyUiState, readUiFacts, productDataPath, gridProducts, SECTIONS } from './lululemon-grid.mjs';
 
 const at = '2026-10-11T15:02:03.456Z';
 /** Make one inert synthetic product tile. @param {string} code Product code. @param {string} name Name. @param {string} prices Price markup. @returns {string} HTML. */
@@ -93,7 +93,8 @@ function fakePage(states, status = 200) {
     goto: async url => { trace.push(url); return { status: () => status, ok: () => status === 200 }; },
     evaluate: async () => { const result = states[index]; if (clicked && index < states.length - 1) index++; return result; },
     waitForTimeout: async () => {},
-    locator: selector => ({ evaluate: async () => grid(tile('x') + tile('y')), click: async () => {
+    // The saved grid holds one distinct product per card of the state read last, unless a test sets page.html.
+    locator: selector => ({ evaluate: async () => page.html ?? grid(Array.from({ length: (await page.evaluate())?.cards ?? 2 }, (_, i) => tile('p' + i)).join('')), click: async () => {
       clicked = true; trace.push(selector.includes('view_more') ? 'click' : 'wrong click');
       if (page.productData !== false) page.emit('response', productData(trace[0], page.productData ?? states.at(-1)?.total));
     } }),
@@ -167,7 +168,7 @@ test('run.log records each View More click, each link check and the expansion to
   assert.ok(log.includes('Women View More check 2 (pre-click 1): visible 1/1, disabled false, aria-disabled none, enabled true, page handler true.'), log.join('\n'));
   assert.ok(log.includes('Women View More click 1 at 1 cards.'));
   assert.ok(log.some(line => /^Women View More check \d+ \(after click 1\): visible 0\/1, disabled n\/a, aria-disabled n\/a, enabled true, page handler n\/a\.$/.test(line)), log.join('\n'));
-  assert.equal(log.at(-1), 'Women complete: 2 of 2 products after 1 View More clicks (last product-data total; product-data totals seen 2 in 1 responses; page total 2).');
+  assert.equal(log.at(-1), 'Women complete: 2 of 2 unique products (2 cards, 0 repeated) after 1 View More clicks (last product-data total; product-data totals seen 2 in 1 responses; page total 2).');
 });
 
 test('a repeat count names the last repeated check and the click it followed, even when flushed by the next click', async () => {
@@ -191,7 +192,7 @@ test('a repeat count names the last repeated check and the click it followed, ev
     'Women product-data XHR after click 2: HTTP 200 /.uf-svc/v1/categories/n16o10z8mhd',
     'Women View More check 8 (after click 2): same result repeated 1 more times.',
     `Women after click 2: URL ${WOMEN_PATH} → ${WOMEN_PATH}, cards 2 → 3, document unknown, main-frame navigations 0, load events 0, DOMContentLoaded 0, retailer requests xhr 1, other-host requests 0.`,
-    'Women complete: 3 of 3 products after 2 View More clicks (last product-data total; product-data totals seen 3 in 2 responses; page total 3).',
+    'Women complete: 3 of 3 unique products (3 cards, 0 repeated) after 2 View More clicks (last product-data total; product-data totals seen 3 in 2 responses; page total 3).',
   ]);
 });
 
@@ -237,7 +238,7 @@ test('a 4xx on any other retailer XHR after a click is logged and expansion cont
     'Men XHR after click 1: HTTP 400 /.uf-svc/v1/categories/n16o10z8mhd', 'Men XHR after click 1: HTTP 410 /.uf-svc/v1/stores',
     'Men product-data XHR after click 1: HTTP 200 /.uf-svc/v1/categories/n18mhdznrqw',
   ]);
-  assert.equal(log.at(-1), 'Men complete: 2 of 2 products after 1 View More clicks (last product-data total; product-data totals seen 2 in 1 responses; page total 2).');
+  assert.equal(log.at(-1), 'Men complete: 2 of 2 unique products (2 cards, 0 repeated) after 1 View More clicks (last product-data total; product-data totals seen 2 in 1 responses; page total 2).');
 });
 
 test('successful, non-XHR, other-host and pre-click responses do not stop expansion; only post-click retailer XHRs are logged', async () => {
@@ -418,14 +419,14 @@ test('a clicked section is complete when its cards equal the product-data total,
   const shown = { ...initial, total: 5 }, done = { ...complete, total: 5 };
   const page = fakePage([shown, done, done]); page.productData = 2;
   assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) }), /product-grid/);
-  assert.equal(log.at(-1), 'Women complete: 2 of 2 products after 1 View More clicks (last product-data total; product-data totals seen 2 in 1 responses; page total 5).');
+  assert.equal(log.at(-1), 'Women complete: 2 of 2 unique products (2 cards, 0 repeated) after 1 View More clicks (last product-data total; product-data totals seen 2 in 1 responses; page total 5).');
 });
 
 test('a clicked section stops when the product-data total is larger than the cards loaded, or the total is missing or not an integer', async () => {
   const shown = { ...initial, total: 5 }, done = { ...complete, total: 5 };
   const missing = 'Incomplete section: a product-data response gave no product total (2 cards loaded; page total 5).';
   for (const [body, message] of [
-    [{ data: { attributes: { totalCount: 3 } } }, 'Incomplete section: 2 of 3 products loaded (last product-data total; product-data totals seen 3 in 1 responses; page total 5).'],
+    [{ data: { attributes: { totalCount: 3 } } }, 'Incomplete section: 2 of 3 unique products loaded (2 cards, 0 repeated; last product-data total; product-data totals seen 3 in 1 responses; page total 5).'],
     [{ data: { attributes: {} } }, missing], [{ data: { attributes: { totalCount: '2' } } }, missing], [{ data: { attributes: { totalCount: 2.5 } } }, missing], [null, missing],
   ]) {
     const page = clickingPage([shown, done, done], [{ ...productData(SECTIONS[0].url, 0), json: async () => body }]);
@@ -449,8 +450,8 @@ test('a clicked section stops when no product-data response arrived, and judges 
   }
   const log = [];
   assert.match(await run([4, 3], log), /product-grid/);
-  assert.equal(log.at(-1), 'Women complete: 3 of 3 products after 2 View More clicks (last product-data total; product-data totals seen 4, 3 in 2 responses; page total 5).');
-  await assert.rejects(run([3, 4]), { message: 'Incomplete section: 3 of 4 products loaded (last product-data total; product-data totals seen 3, 4 in 2 responses; page total 5).' });
+  assert.equal(log.at(-1), 'Women complete: 3 of 3 unique products (3 cards, 0 repeated) after 2 View More clicks (last product-data total; product-data totals seen 4, 3 in 2 responses; page total 5).');
+  await assert.rejects(run([3, 4]), { message: 'Incomplete section: 3 of 4 unique products loaded (3 cards, 0 repeated; last product-data total; product-data totals seen 3, 4 in 2 responses; page total 5).' });
   await assert.rejects(run([3, null]), { message: 'Incomplete section: a product-data response gave no product total (3 cards loaded; page total 5).' });
 });
 
@@ -461,4 +462,40 @@ test('product-data totals come only from the section own successful product-data
   const before = productData(SECTIONS[0].url, 9, 0);
   const page = clickingPage([shown, done, done], [other, graphql, productData(SECTIONS[0].url, 2)], [before]);
   assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), /product-grid/);
+});
+
+test('the grid product count is distinct store product ids among tiles, the id parseGrid keeps', () => {
+  assert.deepEqual(gridProducts(grid(tile('a') + tile('b') + tile('a') + '<div data-testid="product-tile">No link</div>')), { cards: 4, unique: 2 });
+  assert.deepEqual(gridProducts(grid(tile('a', 'One') + tile('a', 'Other name', '$5 $9'))), { cards: 2, unique: 1 });
+  assert.deepEqual(gridProducts(grid('') + tile('outside')), { cards: 0, unique: 0 });
+});
+
+test('repeated cards do not count toward the total: a clicked section stops unless its unique products equal the product-data total', async () => {
+  const shown = { ...initial, total: 3 }, done = { ...complete, cards: 3, total: 3 };
+  const short = fakePage([shown, done, done]); short.productData = 3; short.html = grid(tile('a') + tile('b') + tile('a'));
+  await assert.rejects(collectSection(short, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }),
+    { message: 'Incomplete section: 2 of 3 unique products loaded (3 cards, 1 repeated; last product-data total; product-data totals seen 3 in 1 responses; page total 3).' });
+  const log = [];
+  const full = fakePage([shown, done, done]); full.productData = 2; full.html = grid(tile('a') + tile('b') + tile('a'));
+  assert.match(await collectSection(full, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) }), /product-grid/);
+  assert.equal(log.at(-1), 'Women complete: 2 of 2 unique products (3 cards, 1 repeated) after 1 View More clicks (last product-data total; product-data totals seen 2 in 1 responses; page total 3).');
+});
+
+test('a section with no View More click is judged by unique products against the page total', async () => {
+  const settings = { paceMs: 0, pollMs: 1, timeoutMs: 3 };
+  const page = { ...initial, cards: 3, total: 3, buttons: 0, visibleButtons: 0, enabled: false };
+  const repeated = fakePage([page, page]); repeated.html = grid(tile('a') + tile('b') + tile('a'));
+  await assert.rejects(collectSection(repeated, SECTIONS[2], settings), { message: 'Incomplete section: 2 of 3 unique products loaded (3 cards, 1 repeated).' });
+  const log = [];
+  assert.match(await collectSection(fakePage([page, page]), SECTIONS[2], { ...settings, log: line => log.push(line) }), /product-grid/);
+  assert.equal(log.at(-1), 'Accessories complete: 3 of 3 unique products (3 cards, 0 repeated) after 0 View More clicks (page total, no product-data request; page total 3).');
+});
+
+test('503 cards with 21 repeats against a product-data total of 503 stops: only unique store product ids count', async () => {
+  const codes = Array.from({ length: 482 }, (_, i) => 'w' + i);
+  const html = grid([...codes, ...codes.slice(345, 366)].map(code => tile(code)).join(''));
+  const shown = { ...initial, cards: 40, total: 522 }, done = { ...complete, cards: 503, total: 522 };
+  const page = fakePage([shown, done, done]); page.productData = 503; page.html = html;
+  await assert.rejects(collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }),
+    { message: 'Incomplete section: 482 of 503 unique products loaded (503 cards, 21 repeated; last product-data total; product-data totals seen 503 in 1 responses; page total 522).' });
 });
