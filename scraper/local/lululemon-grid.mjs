@@ -182,24 +182,25 @@ function pageAt(href) {
 }
 
 /** Decide the product total a finished section must match. Without a View More click the page's own embedded total is the
- * only source. After clicks it is the total the section's product-data responses reported (`data.attributes.totalCount`): the
- * embedded total is built before the page loads more products and can count items the product-data service no longer returns.
- * Missing, non-integer or disagreeing product-data totals, or no product-data response at all, stop the section.
- * @param {number} cards Cards loaded. @param {number} clicks View More clicks made. @param {Array<number|null>} dataTotals Totals read from product-data responses (null when unreadable).
- * @param {number|null} pageTotal Embedded page total, for comparison. @returns {number} Expected product count. @throws {Error} When no trustworthy total exists or cards differ from it.
+ * only source. After clicks it is the total reported by the last of the section's product-data responses (`data.attributes.totalCount`):
+ * the embedded total is built before the page loads more products and can count items the product-data service no longer returns,
+ * and the product-data total can move by an item or two during one session, so the latest one counts.
+ * A missing or non-integer product-data total, or no product-data response at all, stops the section.
+ * @param {number} cards Cards loaded. @param {number} clicks View More clicks made. @param {Array<number|null>} dataTotals Totals read from product-data responses in arrival order (null when unreadable).
+ * @param {number|null} pageTotal Embedded page total, for comparison. @returns {object} `total` to match and `note`, the totals seen for run.log. @throws {Error} When no trustworthy total exists or cards differ from it.
  */
 export function expectedTotal(cards, clicks, dataTotals, pageTotal) {
   const shown = `page total ${pageTotal ?? 'unknown'}`;
   if (!clicks) {
     if (!Number.isInteger(pageTotal) || cards !== pageTotal) throw new Error(`Incomplete section: ${cards} of ${pageTotal ?? 'unknown'} products loaded.`);
-    return pageTotal;
+    return { total: pageTotal, note: `page total, no product-data request; ${shown}` };
   }
   if (!dataTotals.length) throw new Error(`Incomplete section: no product-data response after ${clicks} View More clicks (${cards} cards loaded; ${shown}).`);
   if (dataTotals.some(total => !Number.isInteger(total))) throw new Error(`Incomplete section: a product-data response gave no product total (${cards} cards loaded; ${shown}).`);
-  const totals = [...new Set(dataTotals)];
-  if (totals.length > 1) throw new Error(`Incomplete section: product-data totals disagree (${totals.join(', ')}); ${cards} cards loaded; ${shown}.`);
-  if (cards !== totals[0]) throw new Error(`Incomplete section: ${cards} of ${totals[0]} products loaded (product-data total; ${shown}).`);
-  return totals[0];
+  const total = dataTotals.at(-1);
+  const note = `last product-data total; product-data totals seen ${[...new Set(dataTotals)].join(', ')} in ${dataTotals.length} responses; ${shown}`;
+  if (cards !== total) throw new Error(`Incomplete section: ${cards} of ${total} products loaded (${note}).`);
+  return { total, note };
 }
 
 /** Name the product-data request path a section's View More click fires. @param {object} section Official section. @returns {string} Category endpoint path for the section URL's category id. */
@@ -309,7 +310,7 @@ export async function collectSection(page, section, settings = {}) {
         const expected = expectedTotal(final.cards, clicks, totals, final.total);
         const html = await page.locator(GRID).evaluate(el => el.outerHTML);
         flushRepeats();
-        note(`${section.name} complete: ${final.cards} of ${expected} products after ${clicks} View More clicks (${clicks ? `product-data total from ${totals.length} responses` : 'page total, no product-data request'}; page total ${final.total ?? 'unknown'}).`);
+        note(`${section.name} complete: ${final.cards} of ${expected.total} products after ${clicks} View More clicks (${expected.note}).`);
         return html;
       }
       if (state.buttons !== 1 || state.visibleButtons !== 1 || !clickable(state) || clicks >= maxClicks) throw new Error('Incomplete expansion: View More is unavailable or limit reached.');

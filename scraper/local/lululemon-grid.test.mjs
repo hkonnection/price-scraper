@@ -167,7 +167,7 @@ test('run.log records each View More click, each link check and the expansion to
   assert.ok(log.includes('Women View More check 2 (pre-click 1): visible 1/1, disabled false, aria-disabled none, enabled true, page handler true.'), log.join('\n'));
   assert.ok(log.includes('Women View More click 1 at 1 cards.'));
   assert.ok(log.some(line => /^Women View More check \d+ \(after click 1\): visible 0\/1, disabled n\/a, aria-disabled n\/a, enabled true, page handler n\/a\.$/.test(line)), log.join('\n'));
-  assert.equal(log.at(-1), 'Women complete: 2 of 2 products after 1 View More clicks (product-data total from 1 responses; page total 2).');
+  assert.equal(log.at(-1), 'Women complete: 2 of 2 products after 1 View More clicks (last product-data total; product-data totals seen 2 in 1 responses; page total 2).');
 });
 
 test('a repeat count names the last repeated check and the click it followed, even when flushed by the next click', async () => {
@@ -191,7 +191,7 @@ test('a repeat count names the last repeated check and the click it followed, ev
     'Women product-data XHR after click 2: HTTP 200 /.uf-svc/v1/categories/n16o10z8mhd',
     'Women View More check 8 (after click 2): same result repeated 1 more times.',
     `Women after click 2: URL ${WOMEN_PATH} → ${WOMEN_PATH}, cards 2 → 3, document unknown, main-frame navigations 0, load events 0, DOMContentLoaded 0, retailer requests xhr 1, other-host requests 0.`,
-    'Women complete: 3 of 3 products after 2 View More clicks (product-data total from 2 responses; page total 3).',
+    'Women complete: 3 of 3 products after 2 View More clicks (last product-data total; product-data totals seen 3 in 2 responses; page total 3).',
   ]);
 });
 
@@ -237,7 +237,7 @@ test('a 4xx on any other retailer XHR after a click is logged and expansion cont
     'Men XHR after click 1: HTTP 400 /.uf-svc/v1/categories/n16o10z8mhd', 'Men XHR after click 1: HTTP 410 /.uf-svc/v1/stores',
     'Men product-data XHR after click 1: HTTP 200 /.uf-svc/v1/categories/n18mhdznrqw',
   ]);
-  assert.equal(log.at(-1), 'Men complete: 2 of 2 products after 1 View More clicks (product-data total from 1 responses; page total 2).');
+  assert.equal(log.at(-1), 'Men complete: 2 of 2 products after 1 View More clicks (last product-data total; product-data totals seen 2 in 1 responses; page total 2).');
 });
 
 test('successful, non-XHR, other-host and pre-click responses do not stop expansion; only post-click retailer XHRs are logged', async () => {
@@ -418,14 +418,14 @@ test('a clicked section is complete when its cards equal the product-data total,
   const shown = { ...initial, total: 5 }, done = { ...complete, total: 5 };
   const page = fakePage([shown, done, done]); page.productData = 2;
   assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) }), /product-grid/);
-  assert.equal(log.at(-1), 'Women complete: 2 of 2 products after 1 View More clicks (product-data total from 1 responses; page total 5).');
+  assert.equal(log.at(-1), 'Women complete: 2 of 2 products after 1 View More clicks (last product-data total; product-data totals seen 2 in 1 responses; page total 5).');
 });
 
 test('a clicked section stops when the product-data total is larger than the cards loaded, or the total is missing or not an integer', async () => {
   const shown = { ...initial, total: 5 }, done = { ...complete, total: 5 };
   const missing = 'Incomplete section: a product-data response gave no product total (2 cards loaded; page total 5).';
   for (const [body, message] of [
-    [{ data: { attributes: { totalCount: 3 } } }, 'Incomplete section: 2 of 3 products loaded (product-data total; page total 5).'],
+    [{ data: { attributes: { totalCount: 3 } } }, 'Incomplete section: 2 of 3 products loaded (last product-data total; product-data totals seen 3 in 1 responses; page total 5).'],
     [{ data: { attributes: {} } }, missing], [{ data: { attributes: { totalCount: '2' } } }, missing], [{ data: { attributes: { totalCount: 2.5 } } }, missing], [null, missing],
   ]) {
     const page = clickingPage([shown, done, done], [{ ...productData(SECTIONS[0].url, 0), json: async () => body }]);
@@ -435,15 +435,23 @@ test('a clicked section stops when the product-data total is larger than the car
   await assert.rejects(collectSection(broken, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), { message: 'Incomplete section: a product-data response gave no product total (2 cards loaded; page total 5).' });
 });
 
-test('a clicked section stops when no product-data response arrived or the responses report different totals', async () => {
+test('a clicked section stops when no product-data response arrived, and judges changing totals by the last one', async () => {
   const shown = { ...initial, total: 5 }, done = { ...complete, total: 5 };
   const none = clickingPage([shown, done, done], []);
   await assert.rejects(collectSection(none, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), { message: 'Incomplete section: no product-data response after 1 View More clicks (2 cards loaded; page total 5).' });
   const one = { ...initial, total: 5 }, two = { ...one, cards: 2 }, three = { ...one, cards: 3, buttons: 0, visibleButtons: 0, link: null };
-  const page = fakePage([]); const reads = [one, one, two, two, three, three]; let index = 0, offset = 0;
-  page.evaluate = async () => reads[Math.min(index++, reads.length - 1)];
-  const locator = page.locator; page.locator = selector => ({ ...locator(selector), click: async () => { offset += 40; page.emit('response', productData(SECTIONS[0].url, offset === 40 ? 3 : 4, offset)); } });
-  await assert.rejects(collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), { message: 'Incomplete section: product-data totals disagree (3, 4); 3 cards loaded; page total 5.' });
+  /** Expand 1 → 2 → 3 cards with two clicks whose product-data responses report the given totals. @param {number[]} totals Totals per click. @param {string[]} log Run.log lines. @returns {Promise<string>} Collector outcome. */
+  function run(totals, log = []) {
+    const page = fakePage([]); const reads = [one, one, two, two, three, three]; let index = 0, offset = 0;
+    page.evaluate = async () => reads[Math.min(index++, reads.length - 1)];
+    const locator = page.locator; page.locator = selector => ({ ...locator(selector), click: async () => { page.emit('response', productData(SECTIONS[0].url, totals[offset / 40], offset + 40)); offset += 40; } });
+    return collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) });
+  }
+  const log = [];
+  assert.match(await run([4, 3], log), /product-grid/);
+  assert.equal(log.at(-1), 'Women complete: 3 of 3 products after 2 View More clicks (last product-data total; product-data totals seen 4, 3 in 2 responses; page total 5).');
+  await assert.rejects(run([3, 4]), { message: 'Incomplete section: 3 of 4 products loaded (last product-data total; product-data totals seen 3, 4 in 2 responses; page total 5).' });
+  await assert.rejects(run([3, null]), { message: 'Incomplete section: a product-data response gave no product total (3 cards loaded; page total 5).' });
 });
 
 test('product-data totals come only from the section own successful product-data responses after a click', async () => {
