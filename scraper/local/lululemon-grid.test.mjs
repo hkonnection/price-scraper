@@ -520,10 +520,32 @@ test('a re-paged section combines both passes by store product id and is complet
   const html = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, earlier, log: line => log.push(line) });
   assert.deepEqual(gridProducts(html), { cards: 7, unique: 6 });
   for (const code of ['a', 'b', 'c', 'd', 'e', 'f']) assert.match(html, new RegExp(`/p/test/${code}\\?`));
-  assert.ok(log.includes('Women pass 2: 5 unique products in 6 cards; with 1 more from pass 1 the section has 6.'), log.join('\n'));
+  assert.ok(log.includes('Women pass 2: 5 unique products in 6 cards; with 1 more from earlier passes the section has 6.'), log.join('\n'));
   assert.equal(log.at(-1), 'Women complete: 6 of 6 unique products (7 cards, 1 repeated) after 1 View More clicks (last product-data total; product-data totals seen 6 in 1 responses; page total 6).');
   const still = fakePage([shown, done, done]); still.productData = 7; still.html = page.html;
   const error = await collectSection(still, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, earlier }).catch(caught => caught);
   assert.equal(error.message, 'Incomplete section: 6 of 7 unique products loaded (7 cards, 1 repeated; last product-data total; product-data totals seen 7 in 1 responses; page total 6).');
   assert.equal(error.short, true);
+});
+
+test('502 unique products against a last product-data total of 503 stops the pass as short', async () => {
+  const codes = Array.from({ length: 502 }, (_, i) => 'w' + i);
+  const shown = { ...initial, cards: 40, total: 522 }, done = { ...complete, cards: 503, total: 522 };
+  const page = fakePage([shown, done, done]); page.productData = 503; page.html = grid([...codes, codes[0]].map(code => tile(code)).join(''));
+  const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }).catch(caught => caught);
+  assert.equal(error.message, 'Incomplete section: 502 of 503 unique products loaded (503 cards, 1 repeated; last product-data total; product-data totals seen 503 in 1 responses; page total 522).');
+  assert.equal(error.short, true);
+});
+
+test('a union of 507 unique products across passes against a final product-data total of 502 is complete', async () => {
+  const codes = Array.from({ length: 507 }, (_, i) => 'w' + i);
+  const earlier = grid(codes.slice(0, 502).map(code => tile(code)).join(''));
+  const own = grid([...codes.slice(43), ...codes.slice(43, 81)].map(code => tile(code)).join(''));
+  const shown = { ...initial, cards: 40, total: 522 }, done = { ...complete, cards: 502, total: 522 };
+  const log = [];
+  const page = fakePage([shown, done, done]); page.productData = 502; page.html = own;
+  const html = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, earlier, log: line => log.push(line) });
+  assert.equal(gridProducts(html).unique, 507);
+  assert.ok(log.includes('Women pass 2: 464 unique products in 502 cards; with 43 more from earlier passes the section has 507.'), log.join('\n'));
+  assert.match(log.at(-1), /^Women complete: 507 unique products, at least the last product-data total of 502 \(545 cards, 38 repeated\) after 1 View More clicks \(last product-data total; product-data totals seen 502 in 1 responses; page total 522\)\.$/);
 });

@@ -213,12 +213,14 @@ function pageAt(href) {
 /** Decide the product total a finished section must match. Without a View More click the page's own embedded total is the
  * only source. After clicks it is the total reported by the last of the section's product-data responses (`data.attributes.totalCount`):
  * the embedded total is built before the page loads more products and can count items the product-data service no longer returns,
- * and the product-data total can move by an item or two during one session, so the latest one counts.
- * A missing or non-integer product-data total, or no product-data response at all, stops the section. Only distinct store product ids
- * count toward the total: offset paging over a list that changes while it is read repeats some cards and skips other products.
+ * and the product-data total moves while the list changes, so the latest one counts. Only distinct store product ids count: offset
+ * paging over a list that changes while it is read repeats some cards and skips other products. After clicks the section is complete
+ * when its unique products (across all passes) are at least that total; products that left the list between passes can make the union
+ * larger. A missing or non-integer product-data total, or no product-data response at all, stops the section. Without a click the
+ * unique products must equal the embedded total, which describes the same server-rendered page as the tiles.
  * @param {object} products `cards` loaded and `unique` distinct product ids among them (gridProducts). @param {number} clicks View More clicks made. @param {Array<number|null>} dataTotals Totals read from product-data responses in arrival order (null when unreadable).
  * @param {number|null} pageTotal Embedded page total, for comparison. @returns {object} `total` to match and `note`, the totals seen for run.log.
- * @throws {Error} When no trustworthy total exists or unique products differ from it; `short` is set when a clicked section has fewer unique products than its total.
+ * @throws {Error} When no trustworthy total exists or the unique products fall short of it; `short` is set when a clicked section has fewer unique products than its total.
  */
 export function expectedTotal({ cards, unique }, clicks, dataTotals, pageTotal) {
   const shown = `page total ${pageTotal ?? 'unknown'}`, counted = `${cards} cards, ${cards - unique} repeated`;
@@ -230,7 +232,7 @@ export function expectedTotal({ cards, unique }, clicks, dataTotals, pageTotal) 
   if (dataTotals.some(total => !Number.isInteger(total))) throw new Error(`Incomplete section: a product-data response gave no product total (${cards} cards loaded; ${shown}).`);
   const total = dataTotals.at(-1);
   const note = `last product-data total; product-data totals seen ${[...new Set(dataTotals)].join(', ')} in ${dataTotals.length} responses; ${shown}`;
-  if (unique !== total) throw Object.assign(new Error(`Incomplete section: ${unique} of ${total} unique products loaded (${counted}; ${note}).`), unique < total ? { short: true } : {});
+  if (unique < total) throw Object.assign(new Error(`Incomplete section: ${unique} of ${total} unique products loaded (${counted}; ${note}).`), { short: true });
   return { total, note };
 }
 
@@ -243,7 +245,7 @@ export function productDataPath(section) { return PRODUCT_DATA_PATH + new URL(se
  * main-frame navigations, load and DOMContentLoaded events, main-frame document responses, and request counts by type.
  * A 4xx on the section's product-data request after a click is a refusal; other XHR statuses are only logged. 401, 403 and 429 from any retailer resource still refuse.
  * From each successful product-data response it reads only the product total, which decides completeness (see expectedTotal).
- * With `settings.earlier` (a short earlier pass of this section) the saved grid is the union of both passes by product id (mergeGrids).
+ * With `settings.earlier` (the union of this section's earlier short passes) the saved grid is the union with this pass by product id (mergeGrids).
  * A clicked section with fewer unique products than its total throws an error with `short` set and `grid`, the grid it collected.
  * View More is clicked only once the page script has taken over the link. A click before then is a plain `?page=2` page load that never
  * grows the grid, which is how the stalled screen-locked runs ended. The wait before the first click is bounded by readyTimeoutMs.
@@ -346,11 +348,12 @@ export async function collectSection(page, section, settings = {}) {
         flushRepeats();
         if (earlier) {
           const pass = gridProducts(own);
-          note(`${section.name} pass 2: ${pass.unique} unique products in ${pass.cards} cards; with ${products.unique - pass.unique} more from pass 1 the section has ${products.unique}.`);
+          note(`${section.name} pass ${settings.pass ?? 2}: ${pass.unique} unique products in ${pass.cards} cards; with ${products.unique - pass.unique} more from earlier passes the section has ${products.unique}.`);
         }
         let expected;
         try { expected = expectedTotal(products, clicks, totals, final.total); } catch (error) { if (error.short) error.grid = html; throw error; }
-        note(`${section.name} complete: ${products.unique} of ${expected.total} unique products (${products.cards} cards, ${products.cards - products.unique} repeated) after ${clicks} View More clicks (${expected.note}).`);
+        const count = products.unique === expected.total ? `${products.unique} of ${expected.total} unique products` : `${products.unique} unique products, at least the last product-data total of ${expected.total}`;
+        note(`${section.name} complete: ${count} (${products.cards} cards, ${products.cards - products.unique} repeated) after ${clicks} View More clicks (${expected.note}).`);
         return html;
       }
       if (state.buttons !== 1 || state.visibleButtons !== 1 || !clickable(state) || clicks >= maxClicks) throw new Error('Incomplete expansion: View More is unavailable or limit reached.');

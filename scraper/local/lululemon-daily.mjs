@@ -17,6 +17,9 @@ const ROOT = path.resolve(path.dirname(SCRIPT), '../..');
 const WORKFLOW = path.join(ROOT, '.github/workflows/publish-lululemon.yml');
 /** Wait between one section's last request and the next section's page load. A section page load that directly followed another section's requests in the same browser session got HTTP 400 (2026-10-08, 2026-10-14 twice); every first load in a fresh browser succeeded. */
 export const SECTION_PAUSE_MS = 3 * 60 * 1000;
+/** Most loads of one section in a run. The store's list changes while View More pages through it, so one pass can skip products;
+ * a short section is loaded again, after SECTION_PAUSE_MS in a fresh context, and its passes are combined by product id. */
+export const SECTION_PASSES = 3;
 
 /** Reject ambiguous or non-normalized private paths. @param {string} value Path. @returns {string} Validated path. @throws {Error} On unsafe path. */
 function absolutePath(value) {
@@ -78,11 +81,11 @@ function github(args) {
 }
 
 /** Capture a complete set under an exclusive local lock, each section in its own fresh browser context with SECTION_PAUSE_MS between sections
- * (a section the collector reports short is re-paged once, after the same pause, and both passes are combined by product id), validate with the saved publisher, then upload/dispatch exactly once. @param {object} options Validated options. @param {object} overrides Offline dependency injection (including sleep), not CLI flags. @returns {Promise<object>} Saved set and dispatch details. @throws {Error} On any incomplete capture, unsafe state or uncertain remote operation; never retries. */
+ * (a section the collector reports short is loaded again, after the same pause, up to SECTION_PASSES loads, and its passes are combined by product id), validate with the saved publisher, then upload/dispatch exactly once. @param {object} options Validated options. @param {object} overrides Offline dependency injection (including sleep), not CLI flags. @returns {Promise<object>} Saved set and dispatch details. @throws {Error} On any incomplete capture, unsafe state or uncertain remote operation; never retries. */
 export async function runDaily(options, overrides = {}) {
   const r = { now: () => new Date(), platform: process.platform, uid: process.getuid?.(), capture: collectSection,
     launch: async settings => (await import('playwright')).chromium.launch(settings), github, emit: console.log,
-    sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), ...overrides };
+    sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), sectionPasses: SECTION_PASSES, ...overrides };
   if (!options || typeof options.publish !== 'boolean' || !Array.isArray(options.priorFiles)) throw new Error('Invalid daily command options.');
   const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Vancouver', year: 'numeric', month: '2-digit', day: '2-digit' }).format(r.now());
   if (day < '2026-10-11') throw new Error('Daily collection cannot start before October 11, 2026, Pacific time.');
@@ -111,18 +114,18 @@ export async function runDaily(options, overrides = {}) {
     for (const [index, section] of SECTIONS.entries()) {
       if (index) { emit(`Pausing ${SECTION_PAUSE_MS / 1000} s before ${section.name}.`); await r.sleep(SECTION_PAUSE_MS); }
       // Fresh context per pass: no cookies, cache or open page carried over from the previous section or pass.
-      // A clicked section short of unique products (offset paging over a list that changed while read) gets exactly one more pass.
+      // A clicked section short of unique products (offset paging over a list that changed while read) is loaded again, up to sectionPasses loads.
       let html, earlier;
       for (let pass = 1; html === undefined; pass++) {
         const context = await browser.newContext();
         try {
           const page = await context.newPage();
           emit(`${section.name} page load at ${new Date().toISOString()} in a fresh browser context.`);
-          html = await r.capture(page, section, { log: emit, ...(earlier ? { earlier } : {}) });
+          html = await r.capture(page, section, { log: emit, ...(earlier ? { earlier, pass } : {}) });
         } catch (error) {
-          if (pass > 1 || !error?.short || typeof error.grid !== 'string') throw error;
+          if (pass >= r.sectionPasses || !error?.short || typeof error.grid !== 'string') throw error;
           earlier = error.grid;
-          emit(`${section.name} pass 1 short: ${error.message} Re-paging ${section.name} once in a fresh browser context after ${SECTION_PAUSE_MS / 1000} s; both passes are combined by product id.`);
+          emit(`${section.name} pass ${pass} short: ${error.message} Re-paging ${section.name} in a fresh browser context after ${SECTION_PAUSE_MS / 1000} s (pass ${pass + 1} of ${r.sectionPasses}); all passes are combined by product id.`);
         } finally { await context.close().catch(() => {}); }
         if (html === undefined) await r.sleep(SECTION_PAUSE_MS);
       }
