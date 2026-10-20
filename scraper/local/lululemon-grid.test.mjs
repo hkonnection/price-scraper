@@ -77,16 +77,28 @@ test('valid later capture with no new products is accepted but missing/empty/mal
   assert.throws(() => parseGrid(grid(tile('x')), 'Women', 'invalid'));
 });
 
-/** Simulate UI states without any browser/network. @param {object[]} states Ordered DOM snapshots. @param {number} status HTTP status. @returns {object} Page double and trace. */
+/** Make a synthetic browser response. @param {string} url URL. @param {number} status Status. @param {string} type Resource type. @param {*} body JSON body, if any. @returns {object} Response double. */
+function response(url, status, type = 'xhr', body) { return { url: () => url, status: () => status, request: () => ({ resourceType: () => type }), json: async () => body }; }
+/** Make the section's View More product-data response. @param {string} sectionUrl Section page URL. @param {*} total Product total it reports. @param {number} offset Page offset. @returns {object} Response double. */
+function productData(sectionUrl, total, offset = 40) {
+  return response(`https://shop.lululemon.com/.uf-svc/v1/categories/${new URL(sectionUrl).pathname.split('/').pop()}?page%5Blimit%5D=40&page%5Boffset%5D=${offset}`, 200, 'xhr', { data: { attributes: { totalCount: total } } });
+}
+/** Simulate UI states without any browser/network. Each View More click delivers a product-data response reporting
+ * `page.productData` (default: the last state's total); set it to false for none. @param {object[]} states Ordered DOM snapshots. @param {number} status HTTP status. @returns {object} Page double and trace. */
 function fakePage(states, status = 200) {
   let index = 0, clicked = false;
-  const trace = [], handlers = {};
-  return { trace, on: (event, fn) => { handlers[event] = fn; }, off: () => {}, url: () => trace[0] ?? 'about:blank',
+  const trace = [], listeners = {};
+  const page = { trace, on: (event, fn) => { (listeners[event] ||= []).push(fn); }, off: () => {}, url: () => trace[0] ?? 'about:blank',
+    emit: (event, value) => (listeners[event] || []).forEach(fn => fn(value)),
     goto: async url => { trace.push(url); return { status: () => status, ok: () => status === 200 }; },
     evaluate: async () => { const result = states[index]; if (clicked && index < states.length - 1) index++; return result; },
     waitForTimeout: async () => {},
-    locator: selector => ({ evaluate: async () => grid(tile('x') + tile('y')), click: async () => { clicked = true; trace.push(selector.includes('view_more') ? 'click' : 'wrong click'); } }),
+    locator: selector => ({ evaluate: async () => grid(tile('x') + tile('y')), click: async () => {
+      clicked = true; trace.push(selector.includes('view_more') ? 'click' : 'wrong click');
+      if (page.productData !== false) page.emit('response', productData(trace[0], page.productData ?? states.at(-1)?.total));
+    } }),
   };
+  return page;
 }
 test('collector stops before another click when refusal arrives during ordinary pacing', async () => {
   const page = fakePage([initial]);
@@ -139,14 +151,11 @@ test('a non-OK section page load reports status, request cookie count and size a
   await assert.rejects(collectSection(fakePage([initial], 400), SECTIONS[1], settings), { message: 'Collection refused: HTTP 400.' });
 });
 
-/** Make a synthetic browser response. @param {string} url URL. @param {number} status Status. @param {string} type Resource type. @returns {object} Response double. */
-function response(url, status, type = 'xhr') { return { url: () => url, status: () => status, request: () => ({ resourceType: () => type }) }; }
-/** Make a page whose View More click delivers the given responses to the collector's listener. @param {object[]} states UI states. @param {object[]} afterClick Responses fired on click. @param {object[]} beforeClick Responses fired on load. @returns {object} Page double. */
+/** Make a page whose View More click delivers only the given responses to the collector's listener. @param {object[]} states UI states. @param {object[]} afterClick Responses fired on click. @param {object[]} beforeClick Responses fired on load. @returns {object} Page double. */
 function clickingPage(states, afterClick, beforeClick = []) {
-  const page = fakePage(states); let listener;
-  page.on = (event, fn) => { if (event === 'response') listener = fn; };
-  const goto = page.goto; page.goto = async url => { const result = await goto(url); beforeClick.forEach(r => listener(r)); return result; };
-  const locator = page.locator; page.locator = selector => { const real = locator(selector); return { ...real, click: async () => { await real.click(); afterClick.forEach(r => listener(r)); } }; };
+  const page = fakePage(states); page.productData = false;
+  const goto = page.goto; page.goto = async url => { const result = await goto(url); beforeClick.forEach(r => page.emit('response', r)); return result; };
+  const locator = page.locator; page.locator = selector => { const real = locator(selector); return { ...real, click: async () => { await real.click(); afterClick.forEach(r => page.emit('response', r)); } }; };
   return page;
 }
 
@@ -158,7 +167,7 @@ test('run.log records each View More click, each link check and the expansion to
   assert.ok(log.includes('Women View More check 2 (pre-click 1): visible 1/1, disabled false, aria-disabled none, enabled true, page handler true.'), log.join('\n'));
   assert.ok(log.includes('Women View More click 1 at 1 cards.'));
   assert.ok(log.some(line => /^Women View More check \d+ \(after click 1\): visible 0\/1, disabled n\/a, aria-disabled n\/a, enabled true, page handler n\/a\.$/.test(line)), log.join('\n'));
-  assert.equal(log.at(-1), 'Women complete: 2 of 2 products after 1 View More clicks.');
+  assert.equal(log.at(-1), 'Women complete: 2 of 2 products after 1 View More clicks (product-data total from 1 responses; page total 2).');
 });
 
 test('a repeat count names the last repeated check and the click it followed, even when flushed by the next click', async () => {
@@ -167,20 +176,22 @@ test('a repeat count names the last repeated check and the click it followed, ev
   // Before click 1: check 1 (poll), check 2 (pre-click). After click 1: checks 3-5 read 1 card, check 6 reads 2 cards (same link facts).
   // Check 7 is pre-click 2; check 8 follows click 2; then the link is gone.
   const reads = [one, one, one, one, one, two, two, two, done];
-  const page = fakePage([]); let index = 0; page.evaluate = async () => reads[Math.min(index++, reads.length - 1)];
+  const page = fakePage([]); let index = 0; page.evaluate = async () => reads[Math.min(index++, reads.length - 1)]; page.productData = 3;
   await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) });
   const repeat1 = 'Women View More check 6 (after click 1): same result repeated 4 more times.';
   assert.deepEqual(log, [
     'Women View More check 1 (before click 1): visible 1/1, disabled false, aria-disabled none, enabled true, page handler true.',
     'Women View More check 2 (pre-click 1): visible 1/1, disabled false, aria-disabled none, enabled true, page handler true.',
     'Women View More click 1 at 1 cards.',
+    'Women product-data XHR after click 1: HTTP 200 /.uf-svc/v1/categories/n16o10z8mhd',
     repeat1,
-    `Women after click 1: URL ${WOMEN_PATH} → ${WOMEN_PATH}, cards 1 → 2, document unknown, main-frame navigations 0, load events 0, DOMContentLoaded 0, retailer requests none, other-host requests 0.`,
+    `Women after click 1: URL ${WOMEN_PATH} → ${WOMEN_PATH}, cards 1 → 2, document unknown, main-frame navigations 0, load events 0, DOMContentLoaded 0, retailer requests xhr 1, other-host requests 0.`,
     'Women View More check 7 (pre-click 2): visible 1/1, disabled false, aria-disabled none, enabled true, page handler true.',
     'Women View More click 2 at 2 cards.',
+    'Women product-data XHR after click 2: HTTP 200 /.uf-svc/v1/categories/n16o10z8mhd',
     'Women View More check 8 (after click 2): same result repeated 1 more times.',
-    `Women after click 2: URL ${WOMEN_PATH} → ${WOMEN_PATH}, cards 2 → 3, document unknown, main-frame navigations 0, load events 0, DOMContentLoaded 0, retailer requests none, other-host requests 0.`,
-    'Women complete: 3 of 3 products after 2 View More clicks.',
+    `Women after click 2: URL ${WOMEN_PATH} → ${WOMEN_PATH}, cards 2 → 3, document unknown, main-frame navigations 0, load events 0, DOMContentLoaded 0, retailer requests xhr 1, other-host requests 0.`,
+    'Women complete: 3 of 3 products after 2 View More clicks (product-data total from 2 responses; page total 3).',
   ]);
 });
 
@@ -218,20 +229,21 @@ test('a 4xx on any other retailer XHR after a click is logged and expansion cont
   const page = clickingPage([initial, { ...initial, indicators: loading, visibleButtons: 0, link: null }, complete, complete], [
     response('https://shop.lululemon.com/api/dataenablement/profile', 404), response('https://shop.lululemon.com/api/graphql', 400, 'fetch'),
     response('https://shop.lululemon.com/.uf-svc/v1/categories/n16o10z8mhd?page%5Boffset%5D=40', 400),
-    response('https://shop.lululemon.com/.uf-svc/v1/stores?filter%5Bcountry%5D=CA', 410),
+    response('https://shop.lululemon.com/.uf-svc/v1/stores?filter%5Bcountry%5D=CA', 410), productData(SECTIONS[1].url, 2),
   ]);
   assert.match(await collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) }), /product-grid/);
   assert.deepEqual(log.filter(line => line.includes('XHR')), [
     'Men XHR after click 1: HTTP 404 /api/dataenablement/profile', 'Men XHR after click 1: HTTP 400 /api/graphql',
     'Men XHR after click 1: HTTP 400 /.uf-svc/v1/categories/n16o10z8mhd', 'Men XHR after click 1: HTTP 410 /.uf-svc/v1/stores',
+    'Men product-data XHR after click 1: HTTP 200 /.uf-svc/v1/categories/n18mhdznrqw',
   ]);
-  assert.equal(log.at(-1), 'Men complete: 2 of 2 products after 1 View More clicks.');
+  assert.equal(log.at(-1), 'Men complete: 2 of 2 products after 1 View More clicks (product-data total from 1 responses; page total 2).');
 });
 
 test('successful, non-XHR, other-host and pre-click responses do not stop expansion; only post-click retailer XHRs are logged', async () => {
   const log = [];
   const page = clickingPage([initial, { ...initial, indicators: loading, visibleButtons: 0 }, complete, complete], [
-    response('https://shop.lululemon.com/.uf-svc/v1/categories/n16o10z8mhd?page%5Boffset%5D=40', 200), response('https://shop.lululemon.com/api/next', 304, 'fetch'),
+    productData(SECTIONS[0].url, 2), response('https://shop.lululemon.com/api/next', 304, 'fetch'),
     response('https://shop.lululemon.com/missing.png', 404, 'image'), response('https://analytics.example/collect', 400),
   ], [response('https://shop.lululemon.com/.uf-svc/v1/categories/n16o10z8mhd', 404)]);
   assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) }), /product-grid/);
@@ -252,19 +264,16 @@ const WOMEN_PATH = '/en-ca/c/women-we-made-too-much/n16o10z8mhd';
 const WOMEN_DATA = 'https://shop.lululemon.com/.uf-svc/v1/categories/n16o10z8mhd?page%5Blimit%5D=40&page%5Boffset%5D=40';
 /** Make a page that records every event listener and runs a scripted reaction when View More is clicked. @param {object[]} states UI states. @param {Function} onClick Receives (emit, page) on click. @returns {object} Page double. */
 function scriptedPage(states, onClick) {
-  const page = fakePage(states); const listeners = {};
-  page.on = (event, fn) => { (listeners[event] ||= []).push(fn); };
-  /** Deliver one event to its listeners. @param {string} event Event. @param {*} value Payload. @returns {void} */
-  const emit = (event, value) => (listeners[event] || []).forEach(fn => fn(value));
+  const page = fakePage(states); page.productData = false;
   const locator = page.locator;
-  page.locator = selector => { const real = locator(selector); return { ...real, click: async () => { await real.click(); onClick(emit, page); } }; };
+  page.locator = selector => { const real = locator(selector); return { ...real, click: async () => { await real.click(); onClick(page.emit, page); } }; };
   return page;
 }
 
 test('after each click run.log reports URL, cards, document identity, navigation and load events and request counts (in-page growth)', async () => {
   const log = [];
   const page = scriptedPage([{ ...initial, timeOrigin: 7 }, { ...complete, timeOrigin: 7 }], emit => {
-    emit('response', response(WOMEN_DATA, 200)); emit('response', response('https://shop.lululemon.com/metrics/ca/ga/g/c', 204, 'fetch'));
+    emit('response', response(WOMEN_DATA, 200, 'xhr', { data: { attributes: { totalCount: 2 } } })); emit('response', response('https://shop.lululemon.com/metrics/ca/ga/g/c', 204, 'fetch'));
     emit('response', response('https://images.lululemon.com/x.jpg', 200, 'image'));
   });
   await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) });
@@ -288,10 +297,9 @@ test('a click that loads a new document is reported as a navigation with the URL
 });
 
 test('requests during the pause before a click are not labelled as after that click', async () => {
-  const log = []; let listener, fired = false;
+  const log = []; let fired = false;
   const page = fakePage([initial, complete, complete]);
-  page.on = (event, fn) => { if (event === 'response') listener = fn; };
-  page.waitForTimeout = async () => { if (!fired) { fired = true; listener(response('https://shop.lululemon.com/akam/13/pixel_x', 200)); } };
+  page.waitForTimeout = async () => { if (!fired) { fired = true; page.emit('response', response('https://shop.lululemon.com/akam/13/pixel_x', 200)); } };
   await collectSection(page, SECTIONS[0], { paceMs: 1, pollMs: 1, timeoutMs: 50, log: line => log.push(line) });
   assert.ok(!log.some(line => line.includes('/akam/')), log.join('\n'));
   assert.ok(log.includes('Women View More click 1 at 1 cards.'));
@@ -375,7 +383,7 @@ test('the first View More click waits until the page script has taken over the l
   const bare = { ...initial, link: { ...initial.link, handled: false } };
   const reads = [bare, bare, bare, initial, initial, complete, complete];
   const page = fakePage([]); let index = 0; page.evaluate = async () => reads[Math.min(index++, reads.length - 1)];
-  const locator = page.locator; page.locator = selector => ({ ...locator(selector), click: async () => { page.trace.push(`click at read ${index}`); } });
+  const locator = page.locator; page.locator = selector => ({ ...locator(selector), click: async () => { page.trace.push(`click at read ${index}`); page.emit('response', productData(SECTIONS[0].url, 2)); } });
   assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) }), /product-grid/);
   assert.deepEqual(page.trace, [SECTIONS[0].url, 'click at read 5']);
   assert.deepEqual(log.slice(0, 5), [
@@ -403,4 +411,46 @@ test('a link that loses its page handler during the pause before a click is not 
   const page = fakePage([]); let index = 0; page.evaluate = async () => reads[Math.min(index++, reads.length - 1)];
   await assert.rejects(collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 3 }), { message: 'Incomplete expansion: UI changed before View More.' });
   assert.deepEqual(page.trace, [SECTIONS[0].url]);
+});
+
+test('a clicked section is complete when its cards equal the product-data total, even when the page shows a larger total', async () => {
+  const log = [];
+  const shown = { ...initial, total: 5 }, done = { ...complete, total: 5 };
+  const page = fakePage([shown, done, done]); page.productData = 2;
+  assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) }), /product-grid/);
+  assert.equal(log.at(-1), 'Women complete: 2 of 2 products after 1 View More clicks (product-data total from 1 responses; page total 5).');
+});
+
+test('a clicked section stops when the product-data total is larger than the cards loaded, or the total is missing or not an integer', async () => {
+  const shown = { ...initial, total: 5 }, done = { ...complete, total: 5 };
+  const missing = 'Incomplete section: a product-data response gave no product total (2 cards loaded; page total 5).';
+  for (const [body, message] of [
+    [{ data: { attributes: { totalCount: 3 } } }, 'Incomplete section: 2 of 3 products loaded (product-data total; page total 5).'],
+    [{ data: { attributes: {} } }, missing], [{ data: { attributes: { totalCount: '2' } } }, missing], [{ data: { attributes: { totalCount: 2.5 } } }, missing], [null, missing],
+  ]) {
+    const page = clickingPage([shown, done, done], [{ ...productData(SECTIONS[0].url, 0), json: async () => body }]);
+    await assert.rejects(collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), { message }, JSON.stringify(body));
+  }
+  const broken = clickingPage([shown, done, done], [{ ...productData(SECTIONS[0].url, 2), json: async () => { throw new SyntaxError('Unexpected token'); } }]);
+  await assert.rejects(collectSection(broken, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), { message: 'Incomplete section: a product-data response gave no product total (2 cards loaded; page total 5).' });
+});
+
+test('a clicked section stops when no product-data response arrived or the responses report different totals', async () => {
+  const shown = { ...initial, total: 5 }, done = { ...complete, total: 5 };
+  const none = clickingPage([shown, done, done], []);
+  await assert.rejects(collectSection(none, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), { message: 'Incomplete section: no product-data response after 1 View More clicks (2 cards loaded; page total 5).' });
+  const one = { ...initial, total: 5 }, two = { ...one, cards: 2 }, three = { ...one, cards: 3, buttons: 0, visibleButtons: 0, link: null };
+  const page = fakePage([]); const reads = [one, one, two, two, three, three]; let index = 0, offset = 0;
+  page.evaluate = async () => reads[Math.min(index++, reads.length - 1)];
+  const locator = page.locator; page.locator = selector => ({ ...locator(selector), click: async () => { offset += 40; page.emit('response', productData(SECTIONS[0].url, offset === 40 ? 3 : 4, offset)); } });
+  await assert.rejects(collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), { message: 'Incomplete section: product-data totals disagree (3, 4); 3 cards loaded; page total 5.' });
+});
+
+test('product-data totals come only from the section own successful product-data responses after a click', async () => {
+  const shown = { ...initial, total: 5 }, done = { ...complete, total: 5 };
+  const other = response('https://shop.lululemon.com/.uf-svc/v1/categories/n18mhdznrqw?page%5Boffset%5D=40', 200, 'xhr', { data: { attributes: { totalCount: 9 } } });
+  const graphql = response('https://shop.lululemon.com/api/graphql', 200, 'fetch', { data: { attributes: { totalCount: 9 } } });
+  const before = productData(SECTIONS[0].url, 9, 0);
+  const page = clickingPage([shown, done, done], [other, graphql, productData(SECTIONS[0].url, 2)], [before]);
+  assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), /product-grid/);
 });

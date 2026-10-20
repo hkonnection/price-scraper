@@ -181,6 +181,27 @@ function pageAt(href) {
   } catch { return 'unknown'; }
 }
 
+/** Decide the product total a finished section must match. Without a View More click the page's own embedded total is the
+ * only source. After clicks it is the total the section's product-data responses reported (`data.attributes.totalCount`): the
+ * embedded total is built before the page loads more products and can count items the product-data service no longer returns.
+ * Missing, non-integer or disagreeing product-data totals, or no product-data response at all, stop the section.
+ * @param {number} cards Cards loaded. @param {number} clicks View More clicks made. @param {Array<number|null>} dataTotals Totals read from product-data responses (null when unreadable).
+ * @param {number|null} pageTotal Embedded page total, for comparison. @returns {number} Expected product count. @throws {Error} When no trustworthy total exists or cards differ from it.
+ */
+export function expectedTotal(cards, clicks, dataTotals, pageTotal) {
+  const shown = `page total ${pageTotal ?? 'unknown'}`;
+  if (!clicks) {
+    if (!Number.isInteger(pageTotal) || cards !== pageTotal) throw new Error(`Incomplete section: ${cards} of ${pageTotal ?? 'unknown'} products loaded.`);
+    return pageTotal;
+  }
+  if (!dataTotals.length) throw new Error(`Incomplete section: no product-data response after ${clicks} View More clicks (${cards} cards loaded; ${shown}).`);
+  if (dataTotals.some(total => !Number.isInteger(total))) throw new Error(`Incomplete section: a product-data response gave no product total (${cards} cards loaded; ${shown}).`);
+  const totals = [...new Set(dataTotals)];
+  if (totals.length > 1) throw new Error(`Incomplete section: product-data totals disagree (${totals.join(', ')}); ${cards} cards loaded; ${shown}.`);
+  if (cards !== totals[0]) throw new Error(`Incomplete section: ${cards} of ${totals[0]} products loaded (product-data total; ${shown}).`);
+  return totals[0];
+}
+
 /** Name the product-data request path a section's View More click fires. @param {object} section Official section. @returns {string} Category endpoint path for the section URL's category id. */
 export function productDataPath(section) { return PRODUCT_DATA_PATH + new URL(section.url).pathname.split('/').pop(); }
 
@@ -189,6 +210,7 @@ export function productDataPath(section) { return PRODUCT_DATA_PATH + new URL(se
  * After each click it also logs what the page did: URL and card count before and after, whether the document stayed the same (performance.timeOrigin),
  * main-frame navigations, load and DOMContentLoaded events, main-frame document responses, and request counts by type.
  * A 4xx on the section's product-data request after a click is a refusal; other XHR statuses are only logged. 401, 403 and 429 from any retailer resource still refuse.
+ * From each successful product-data response it reads only the product total, which decides completeness (see expectedTotal).
  * View More is clicked only once the page script has taken over the link. A click before then is a plain `?page=2` page load that never
  * grows the grid, which is how the stalled screen-locked runs ended. The wait before the first click is bounded by readyTimeoutMs.
  * @param {import('playwright').Page} page Headed Chrome page.
@@ -200,10 +222,11 @@ export function productDataPath(section) { return PRODUCT_DATA_PATH + new URL(se
 export async function collectSection(page, section, settings = {}) {
   const { paceMs = 1200, pollMs = 250, timeoutMs = 30000, readyTimeoutMs = 60000, maxClicks = 200, log = () => {} } = settings;
   const dataPath = productDataPath(section);
+  const dataTotals = [];
   let refused = null, clicks = 0, checks = 0, lastFacts = null, repeats = 0, lastRepeat = '', after = null, lastState = null;
   /** Write one diagnostic line without letting a logging failure replace the collector's own outcome. @param {string} line Diagnostic. @returns {void} */
   function note(line) { try { log(line); } catch { /* Diagnostics are best effort. */ } }
-  /** Detect refusal responses without inspecting bodies; record status and path of retailer XHRs after a click, marking the product-data request. @param {object} response Browser response. @returns {void} */
+  /** Detect refusal responses; record status and path of retailer XHRs after a click, marking the product-data request, and read only the product total from a successful product-data body. @param {object} response Browser response. @returns {void} */
   function onResponse(response) {
     const url = new URL(response.url());
     let type = '';
@@ -217,6 +240,9 @@ export async function collectSection(page, section, settings = {}) {
     if (call) note(`${section.name} ${productData ? 'product-data ' : ''}XHR after click ${clicks}: HTTP ${status} ${logPath(url)}`);
     if (!refused && productData && status >= 400 && status < 500) refused = `View More product-data request HTTP ${status} ${logPath(url)}`;
     else if (!refused && [401, 403, 429].includes(status)) refused = `HTTP ${status} ${logPath(url)}`;
+    if (productData && status >= 200 && status < 300) {
+      dataTotals.push(Promise.resolve().then(() => response.json()).then(body => (Number.isInteger(body?.data?.attributes?.totalCount) ? body.data.attributes.totalCount : null), () => null));
+    }
   }
   /** Count main-frame navigations after a click. @param {object} frame Navigated frame. @returns {void} */
   function onNavigated(frame) { try { if (after && !frame.parentFrame()) after.navigations++; } catch { /* Unknown frame is not counted. */ } }
@@ -279,10 +305,11 @@ export async function collectSection(page, section, settings = {}) {
         const final = await uiState(page);
         stopIfRefused(final);
         if (final.grids !== 1 || final.busy || final.buttons !== 0 || final.cards !== state.cards) throw new Error('Incomplete expansion: grid did not settle.');
-        if (!Number.isInteger(final.total) || final.cards !== final.total) throw new Error(`Incomplete section: ${final.cards} of ${final.total ?? 'unknown'} products loaded.`);
+        const totals = await Promise.all(dataTotals);
+        const expected = expectedTotal(final.cards, clicks, totals, final.total);
         const html = await page.locator(GRID).evaluate(el => el.outerHTML);
         flushRepeats();
-        note(`${section.name} complete: ${final.cards} of ${final.total} products after ${clicks} View More clicks.`);
+        note(`${section.name} complete: ${final.cards} of ${expected} products after ${clicks} View More clicks (${clicks ? `product-data total from ${totals.length} responses` : 'page total, no product-data request'}; page total ${final.total ?? 'unknown'}).`);
         return html;
       }
       if (state.buttons !== 1 || state.visibleButtons !== 1 || !clickable(state) || clicks >= maxClicks) throw new Error('Incomplete expansion: View More is unavailable or limit reached.');
