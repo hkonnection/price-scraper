@@ -112,7 +112,11 @@ async function uiState(page) {
   return classifyUiState(await page.evaluate(readUiFacts));
 }
 
-/** Runs inside the page: read UI facts only. A document without a body yet (mid-navigation) reads as not settled. @returns {object} Raw UI facts. */
+/** Runs inside the page: read UI facts only. A document without a body yet (mid-navigation) reads as not settled.
+ * `link.handled` says whether the page script has taken over the View More link: React puts its props on every element it has hydrated.
+ * Before that, a click on the server-rendered link is an ordinary navigation to `?page=2` and no product-data request is sent.
+ * @returns {object} Raw UI facts.
+ */
 export function readUiFacts() {
     const refusalText = /access denied|request blocked|verify (?:that )?you are human|unusual traffic|captcha|security challenge|temporarily blocked|pardon our interruption/i;
     if (!document.body) return { grids: 0, cards: 0, total: null, buttons: 0, visibleButtons: 0, enabled: false, indicators: [], refusal: refusalText.test(document.title || '') };
@@ -131,7 +135,7 @@ export function readUiFacts() {
     const shown = buttons.filter(visible);
     return { grids: grids.length, cards: grids[0]?.querySelectorAll('[data-testid="product-tile"]').length || 0,
       total: pageTotal(), buttons: buttons.length, visibleButtons: shown.length, enabled: shown.length === 1 && !shown[0].disabled && shown[0].getAttribute('aria-disabled') !== 'true',
-      link: shown.length === 1 ? { disabled: Boolean(shown[0].disabled), ariaDisabled: shown[0].getAttribute('aria-disabled') } : null,
+      link: shown.length === 1 ? { disabled: Boolean(shown[0].disabled), ariaDisabled: shown[0].getAttribute('aria-disabled'), handled: Object.keys(shown[0]).some(key => key.startsWith('__reactProps$')) } : null,
       timeOrigin: performance.timeOrigin,
       indicators: [...document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [data-testid*="loading"]')].filter(visible).map(el => ({ carousel: Boolean(el.closest('[class*="carousel"]')) })),
       refusal: refusalText.test(document.title + ' ' + document.body.innerText) };
@@ -156,11 +160,14 @@ export async function refusalShape(response) {
   } catch { return ''; }
 }
 
-/** Describe the View More link as read by one status check. @param {object} state UI state. @returns {string} Disabled, aria-disabled and enabled facts. */
+/** Describe the View More link as read by one status check. @param {object} state UI state. @returns {string} Disabled, aria-disabled, enabled and page handler facts. */
 function linkFacts(state) {
   const link = state.link;
-  return `disabled ${link ? link.disabled : 'n/a'}, aria-disabled ${link ? link.ariaDisabled ?? 'none' : 'n/a'}, enabled ${state.enabled}`;
+  return `disabled ${link ? link.disabled : 'n/a'}, aria-disabled ${link ? link.ariaDisabled ?? 'none' : 'n/a'}, enabled ${state.enabled}, page handler ${link ? link.handled : 'n/a'}`;
 }
+
+/** Whether View More can be clicked: enabled and already taken over by the page script. @param {object} state UI state. @returns {boolean} Clickable. */
+function clickable(state) { return state.enabled && state.link?.handled === true; }
 
 /** Keep only a URL's path for logs: no query, fragment, host or control characters. @param {URL} url Parsed URL. @returns {string} Bounded path. */
 function logPath(url) { return url.pathname.replace(/[\x00-\x20\x7f]/g, '').slice(0, 200); }
@@ -182,14 +189,16 @@ export function productDataPath(section) { return PRODUCT_DATA_PATH + new URL(se
  * After each click it also logs what the page did: URL and card count before and after, whether the document stayed the same (performance.timeOrigin),
  * main-frame navigations, load and DOMContentLoaded events, main-frame document responses, and request counts by type.
  * A 4xx on the section's product-data request after a click is a refusal; other XHR statuses are only logged. 401, 403 and 429 from any retailer resource still refuse.
+ * View More is clicked only once the page script has taken over the link. A click before then is a plain `?page=2` page load that never
+ * grows the grid, which is how the stalled screen-locked runs ended. The wait before the first click is bounded by readyTimeoutMs.
  * @param {import('playwright').Page} page Headed Chrome page.
  * @param {object} section Official section.
- * @param {object} settings Bounded waits (overridable for offline tests only) and `log`, the run.log writer.
+ * @param {object} settings Bounded waits (overridable for offline tests only: timeoutMs after a click, readyTimeoutMs before the first) and `log`, the run.log writer.
  * @returns {Promise<string>} Complete grid HTML.
  * @throws {Error} On refusal, empty/missing grid, stalled loading or expansion.
  */
 export async function collectSection(page, section, settings = {}) {
-  const { paceMs = 1200, pollMs = 250, timeoutMs = 30000, maxClicks = 200, log = () => {} } = settings;
+  const { paceMs = 1200, pollMs = 250, timeoutMs = 30000, readyTimeoutMs = 60000, maxClicks = 200, log = () => {} } = settings;
   const dataPath = productDataPath(section);
   let refused = null, clicks = 0, checks = 0, lastFacts = null, repeats = 0, lastRepeat = '', after = null, lastState = null;
   /** Write one diagnostic line without letting a logging failure replace the collector's own outcome. @param {string} line Diagnostic. @returns {void} */
@@ -259,8 +268,8 @@ export async function collectSection(page, section, settings = {}) {
         if (state.grids > 1) throw new Error('Unexpected product grid markup.');
         if (state.grids === 1 && !state.busy && state.cards === 0) throw new Error('Empty captured section.');
         const settled = state.grids === 1 && !state.busy && state.cards > 0 && (!expectGrowth || state.cards > previous);
-        if (settled && (state.buttons === 0 || state.enabled)) break;
-        if (elapsed >= timeoutMs) throw new Error(state.grids === 1 && state.cards === 0 ? 'Empty captured section.' : `Incomplete expansion or stalled loading (cards ${state.cards}, busy ${state.busy}, View More ${state.visibleButtons}/${state.buttons} visible, link ${linkFacts(state)}; ${clicks ? `after click ${clicks} of View More` : 'before the first View More click'}).`);
+        if (settled && (state.buttons === 0 || clickable(state))) break;
+        if (elapsed >= (clicks ? timeoutMs : readyTimeoutMs)) throw new Error(state.grids === 1 && state.cards === 0 ? 'Empty captured section.' : `Incomplete expansion or stalled loading (cards ${state.cards}, busy ${state.busy}, View More ${state.visibleButtons}/${state.buttons} visible, link ${linkFacts(state)}; ${clicks ? `after click ${clicks} of View More` : 'before the first View More click'}).`);
         await page.waitForTimeout(pollMs);
       }
       reportAfterClick(state);
@@ -276,13 +285,13 @@ export async function collectSection(page, section, settings = {}) {
         note(`${section.name} complete: ${final.cards} of ${final.total} products after ${clicks} View More clicks.`);
         return html;
       }
-      if (state.buttons !== 1 || state.visibleButtons !== 1 || !state.enabled || clicks >= maxClicks) throw new Error('Incomplete expansion: View More is unavailable or limit reached.');
+      if (state.buttons !== 1 || state.visibleButtons !== 1 || !clickable(state) || clicks >= maxClicks) throw new Error('Incomplete expansion: View More is unavailable or limit reached.');
       previous = state.cards; expectGrowth = true;
       await page.waitForTimeout(paceMs);
       const beforeClick = await uiState(page);
       stopIfRefused(beforeClick);
       checkLink(beforeClick, true);
-      if (beforeClick.busy || beforeClick.grids !== 1 || beforeClick.cards !== previous || beforeClick.buttons !== 1 || beforeClick.visibleButtons !== 1 || !beforeClick.enabled) throw new Error('Incomplete expansion: UI changed before View More.');
+      if (beforeClick.busy || beforeClick.grids !== 1 || beforeClick.cards !== previous || beforeClick.buttons !== 1 || beforeClick.visibleButtons !== 1 || !clickable(beforeClick)) throw new Error('Incomplete expansion: UI changed before View More.');
       clicks++;
       note(`${section.name} View More click ${clicks} at ${previous} cards.`);
       after = { click: clicks, url: currentAt(), cards: beforeClick.cards, timeOrigin: beforeClick.timeOrigin, navigations: 0, loads: 0, contentLoads: 0, retailer: {}, otherHosts: 0 };

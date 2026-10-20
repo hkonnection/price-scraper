@@ -95,7 +95,7 @@ test('collector stops before another click when refusal arrives during ordinary 
   assert.deepEqual(page.trace, [SECTIONS[0].url]);
 });
 
-const initial = { grids: 1, cards: 1, total: 2, buttons: 1, visibleButtons: 1, enabled: true, link: { disabled: false, ariaDisabled: null }, indicators: [], refusal: false };
+const initial = { grids: 1, cards: 1, total: 2, buttons: 1, visibleButtons: 1, enabled: true, link: { disabled: false, ariaDisabled: null, handled: true }, indicators: [], refusal: false };
 const loading = [{ carousel: false }];
 const complete = { ...initial, cards: 2, buttons: 0, visibleButtons: 0 };
 
@@ -154,10 +154,10 @@ test('run.log records each View More click, each link check and the expansion to
   const log = [];
   const page = fakePage([initial, { ...initial, indicators: loading, visibleButtons: 0, link: null }, complete, complete]);
   await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) });
-  assert.ok(log.includes('Women View More check 1 (before click 1): visible 1/1, disabled false, aria-disabled none, enabled true.'), log.join('\n'));
-  assert.ok(log.includes('Women View More check 2 (pre-click 1): visible 1/1, disabled false, aria-disabled none, enabled true.'), log.join('\n'));
+  assert.ok(log.includes('Women View More check 1 (before click 1): visible 1/1, disabled false, aria-disabled none, enabled true, page handler true.'), log.join('\n'));
+  assert.ok(log.includes('Women View More check 2 (pre-click 1): visible 1/1, disabled false, aria-disabled none, enabled true, page handler true.'), log.join('\n'));
   assert.ok(log.includes('Women View More click 1 at 1 cards.'));
-  assert.ok(log.some(line => /^Women View More check \d+ \(after click 1\): visible 0\/1, disabled n\/a, aria-disabled n\/a, enabled true\.$/.test(line)), log.join('\n'));
+  assert.ok(log.some(line => /^Women View More check \d+ \(after click 1\): visible 0\/1, disabled n\/a, aria-disabled n\/a, enabled true, page handler n\/a\.$/.test(line)), log.join('\n'));
   assert.equal(log.at(-1), 'Women complete: 2 of 2 products after 1 View More clicks.');
 });
 
@@ -171,12 +171,12 @@ test('a repeat count names the last repeated check and the click it followed, ev
   await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) });
   const repeat1 = 'Women View More check 6 (after click 1): same result repeated 4 more times.';
   assert.deepEqual(log, [
-    'Women View More check 1 (before click 1): visible 1/1, disabled false, aria-disabled none, enabled true.',
-    'Women View More check 2 (pre-click 1): visible 1/1, disabled false, aria-disabled none, enabled true.',
+    'Women View More check 1 (before click 1): visible 1/1, disabled false, aria-disabled none, enabled true, page handler true.',
+    'Women View More check 2 (pre-click 1): visible 1/1, disabled false, aria-disabled none, enabled true, page handler true.',
     'Women View More click 1 at 1 cards.',
     repeat1,
     `Women after click 1: URL ${WOMEN_PATH} → ${WOMEN_PATH}, cards 1 → 2, document unknown, main-frame navigations 0, load events 0, DOMContentLoaded 0, retailer requests none, other-host requests 0.`,
-    'Women View More check 7 (pre-click 2): visible 1/1, disabled false, aria-disabled none, enabled true.',
+    'Women View More check 7 (pre-click 2): visible 1/1, disabled false, aria-disabled none, enabled true, page handler true.',
     'Women View More click 2 at 2 cards.',
     'Women View More check 8 (after click 2): same result repeated 1 more times.',
     `Women after click 2: URL ${WOMEN_PATH} → ${WOMEN_PATH}, cards 2 → 3, document unknown, main-frame navigations 0, load events 0, DOMContentLoaded 0, retailer requests none, other-host requests 0.`,
@@ -186,13 +186,13 @@ test('a repeat count names the last repeated check and the click it followed, ev
 
 test('repeated identical link checks are counted, and a stall says the click count and last link state', async () => {
   const log = [];
-  const stuck = { ...initial, link: { disabled: false, ariaDisabled: null } };
+  const stuck = { ...initial, link: { disabled: false, ariaDisabled: null, handled: true } };
   const error = await collectSection(fakePage([stuck, stuck]), SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 6, log: line => log.push(line) }).catch(caught => caught);
-  assert.equal(error.message, 'Incomplete expansion or stalled loading (cards 1, busy false, View More 1/1 visible, link disabled false, aria-disabled none, enabled true; after click 1 of View More).');
+  assert.equal(error.message, 'Incomplete expansion or stalled loading (cards 1, busy false, View More 1/1 visible, link disabled false, aria-disabled none, enabled true, page handler true; after click 1 of View More).');
   assert.ok(log.some(line => /^Women View More check \d+ \(after click 1\): same result repeated \d+ more times\.$/.test(line)), log.join('\n'));
-  const disabled = { ...initial, enabled: false, link: { disabled: false, ariaDisabled: 'true' } };
-  await assert.rejects(collectSection(fakePage([disabled]), SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }),
-    { message: 'Incomplete expansion or stalled loading (cards 1, busy false, View More 1/1 visible, link disabled false, aria-disabled true, enabled false; before the first View More click).' });
+  const disabled = { ...initial, enabled: false, link: { disabled: false, ariaDisabled: 'true', handled: true } };
+  await assert.rejects(collectSection(fakePage([disabled]), SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2, readyTimeoutMs: 2 }),
+    { message: 'Incomplete expansion or stalled loading (cards 1, busy false, View More 1/1 visible, link disabled false, aria-disabled true, enabled false, page handler true; before the first View More click).' });
 });
 
 const MEN_DATA = 'https://shop.lululemon.com/.uf-svc/v1/categories/n18mhdznrqw?filter%5Bsku.availability%5D=true%2Cfalse&page%5Blimit%5D=40&page%5Boffset%5D=40&slug=men-we-made-too-much&token=secretvalue';
@@ -307,7 +307,7 @@ test('the browser-side reader reports the View More link disabled and aria-disab
     globalThis.document = { title: '', body: { innerText: '' }, getElementById: () => null,
       querySelectorAll: selector => (selector.includes('view_more') ? [link] : selector.includes('product-grid') ? [element()] : []) };
     const facts = readUiFacts();
-    assert.deepEqual(facts.link, { disabled: false, ariaDisabled: 'true' });
+    assert.deepEqual(facts.link, { disabled: false, ariaDisabled: 'true', handled: false });
     assert.equal(facts.timeOrigin, performance.timeOrigin);
     assert.equal(facts.enabled, false);
   } finally { Object.assign(globalThis, saved); }
@@ -352,5 +352,55 @@ test('a page document without a body yet reads as not settled, and a refusal tit
   const page = fakePage([full]);
   let reads = 0; const read = page.evaluate; page.evaluate = async () => (reads++ === 0 ? noBody : read());
   assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), /product-grid/);
-  await assert.rejects(collectSection(fakePage([noBody]), SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 3 }), /incomplete|stall/i);
+  await assert.rejects(collectSection(fakePage([noBody]), SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 3, readyTimeoutMs: 3 }), /incomplete|stall/i);
+});
+
+test('the browser-side reader reports whether the page script has taken over the View More link (React props on the element)', () => {
+  const saved = { document: globalThis.document, getComputedStyle: globalThis.getComputedStyle };
+  /** Make a visible element double. @param {object} extra Fields. @returns {object} Element. */
+  const element = (extra = {}) => ({ getClientRects: () => [1], closest: () => null, querySelectorAll: () => [], getAttribute: () => null, ...extra });
+  try {
+    globalThis.getComputedStyle = () => ({ visibility: 'visible' });
+    for (const [extra, handled] of [[{}, false], [{ __reactFiber$x1: {} }, false], [{ __reactProps$x1: { onClick() {} } }, true], [{ __reactProps$x1: {} }, true]]) {
+      const link = element(extra);
+      globalThis.document = { title: '', body: { innerText: '' }, getElementById: () => null,
+        querySelectorAll: selector => (selector.includes('view_more') ? [link] : selector.includes('product-grid') ? [element()] : []) };
+      assert.deepEqual(readUiFacts().link, { disabled: false, ariaDisabled: null, handled }, JSON.stringify(Object.keys(extra)));
+    }
+  } finally { Object.assign(globalThis, saved); }
+});
+
+test('the first View More click waits until the page script has taken over the link, logging the handler state', async () => {
+  const log = [];
+  const bare = { ...initial, link: { ...initial.link, handled: false } };
+  const reads = [bare, bare, bare, initial, initial, complete, complete];
+  const page = fakePage([]); let index = 0; page.evaluate = async () => reads[Math.min(index++, reads.length - 1)];
+  const locator = page.locator; page.locator = selector => ({ ...locator(selector), click: async () => { page.trace.push(`click at read ${index}`); } });
+  assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) }), /product-grid/);
+  assert.deepEqual(page.trace, [SECTIONS[0].url, 'click at read 5']);
+  assert.deepEqual(log.slice(0, 5), [
+    'Women View More check 1 (before click 1): visible 1/1, disabled false, aria-disabled none, enabled true, page handler false.',
+    'Women View More check 3 (before click 1): same result repeated 2 more times.',
+    'Women View More check 4 (before click 1): visible 1/1, disabled false, aria-disabled none, enabled true, page handler true.',
+    'Women View More check 5 (pre-click 1): visible 1/1, disabled false, aria-disabled none, enabled true, page handler true.',
+    'Women View More click 1 at 1 cards.',
+  ]);
+});
+
+test('a View More link the page script never takes over stops the section before any click, after the longer first wait', async () => {
+  const bare = { ...initial, link: { ...initial.link, handled: false } };
+  let reads = 0;
+  const page = fakePage([bare]); const read = page.evaluate; page.evaluate = async () => { reads++; return read(); };
+  await assert.rejects(collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 3, readyTimeoutMs: 20 }),
+    { message: 'Incomplete expansion or stalled loading (cards 1, busy false, View More 1/1 visible, link disabled false, aria-disabled none, enabled true, page handler false; before the first View More click).' });
+  assert.equal(reads, 21);
+  assert.deepEqual(page.trace, [SECTIONS[0].url]);
+});
+
+test('a link that loses its page handler during the pause before a click is not clicked', async () => {
+  const bare = { ...initial, link: { ...initial.link, handled: false } };
+  const reads = [initial, bare];
+  const page = fakePage([]); let index = 0; page.evaluate = async () => reads[Math.min(index++, reads.length - 1)];
+  await assert.rejects(collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 3 }), { message: 'Incomplete expansion: UI changed before View More.' });
+  assert.deepEqual(page.trace, [SECTIONS[0].url]);
 });
