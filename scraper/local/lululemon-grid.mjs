@@ -59,6 +59,21 @@ export function gridProducts(html) {
   return { cards: tiles.length, unique: new Set(tiles.map(element => tileProduct($, $(element)).code).filter(Boolean)).size };
 }
 
+/** Combine a re-paged grid with an earlier pass of the same section: keep every tile of the new grid and add the earlier pass's tiles
+ * whose store product id the new grid lacks, in their earlier order. @param {string} html New grid outerHTML. @param {string} earlier Earlier pass grid outerHTML.
+ * @returns {string} Combined grid outerHTML.
+ */
+export function mergeGrids(html, earlier) {
+  const $ = cheerio.load(html), $earlier = cheerio.load(earlier);
+  const target = $(GRID).first();
+  const have = new Set(target.find(TILE).toArray().map(element => tileProduct($, $(element)).code).filter(Boolean));
+  for (const element of $earlier(GRID).first().find(TILE).toArray()) {
+    const code = tileProduct($earlier, $earlier(element)).code;
+    if (code && !have.has(code)) { have.add(code); target.append($earlier.html(element)); }
+  }
+  return $.html(target);
+}
+
 /** Parse only tile descendants of one grid without executing markup or fetching resources. @param {string} html Grid outerHTML. @param {string} section Section name. @param {string} at Actual UTC timestamp. @param {Map<string,string>} prior Saved categories. @returns {object} Raw envelope and card accounting. @throws {Error} On missing/empty/unusable grids. */
 export function parseGrid(html, section, at, prior = new Map()) {
   validateCaptureTime(at);
@@ -202,7 +217,8 @@ function pageAt(href) {
  * A missing or non-integer product-data total, or no product-data response at all, stops the section. Only distinct store product ids
  * count toward the total: offset paging over a list that changes while it is read repeats some cards and skips other products.
  * @param {object} products `cards` loaded and `unique` distinct product ids among them (gridProducts). @param {number} clicks View More clicks made. @param {Array<number|null>} dataTotals Totals read from product-data responses in arrival order (null when unreadable).
- * @param {number|null} pageTotal Embedded page total, for comparison. @returns {object} `total` to match and `note`, the totals seen for run.log. @throws {Error} When no trustworthy total exists or cards differ from it.
+ * @param {number|null} pageTotal Embedded page total, for comparison. @returns {object} `total` to match and `note`, the totals seen for run.log.
+ * @throws {Error} When no trustworthy total exists or unique products differ from it; `short` is set when a clicked section has fewer unique products than its total.
  */
 export function expectedTotal({ cards, unique }, clicks, dataTotals, pageTotal) {
   const shown = `page total ${pageTotal ?? 'unknown'}`, counted = `${cards} cards, ${cards - unique} repeated`;
@@ -214,7 +230,7 @@ export function expectedTotal({ cards, unique }, clicks, dataTotals, pageTotal) 
   if (dataTotals.some(total => !Number.isInteger(total))) throw new Error(`Incomplete section: a product-data response gave no product total (${cards} cards loaded; ${shown}).`);
   const total = dataTotals.at(-1);
   const note = `last product-data total; product-data totals seen ${[...new Set(dataTotals)].join(', ')} in ${dataTotals.length} responses; ${shown}`;
-  if (unique !== total) throw new Error(`Incomplete section: ${unique} of ${total} unique products loaded (${counted}; ${note}).`);
+  if (unique !== total) throw Object.assign(new Error(`Incomplete section: ${unique} of ${total} unique products loaded (${counted}; ${note}).`), unique < total ? { short: true } : {});
   return { total, note };
 }
 
@@ -227,16 +243,18 @@ export function productDataPath(section) { return PRODUCT_DATA_PATH + new URL(se
  * main-frame navigations, load and DOMContentLoaded events, main-frame document responses, and request counts by type.
  * A 4xx on the section's product-data request after a click is a refusal; other XHR statuses are only logged. 401, 403 and 429 from any retailer resource still refuse.
  * From each successful product-data response it reads only the product total, which decides completeness (see expectedTotal).
+ * With `settings.earlier` (a short earlier pass of this section) the saved grid is the union of both passes by product id (mergeGrids).
+ * A clicked section with fewer unique products than its total throws an error with `short` set and `grid`, the grid it collected.
  * View More is clicked only once the page script has taken over the link. A click before then is a plain `?page=2` page load that never
  * grows the grid, which is how the stalled screen-locked runs ended. The wait before the first click is bounded by readyTimeoutMs.
  * @param {import('playwright').Page} page Headed Chrome page.
  * @param {object} section Official section.
- * @param {object} settings Bounded waits (overridable for offline tests only: timeoutMs after a click, readyTimeoutMs before the first) and `log`, the run.log writer.
+ * @param {object} settings Bounded waits (overridable for offline tests only: timeoutMs after a click, readyTimeoutMs before the first), `log`, the run.log writer, and optional `earlier` grid HTML.
  * @returns {Promise<string>} Complete grid HTML.
  * @throws {Error} On refusal, empty/missing grid, stalled loading or expansion.
  */
 export async function collectSection(page, section, settings = {}) {
-  const { paceMs = 1200, pollMs = 250, timeoutMs = 30000, readyTimeoutMs = 60000, maxClicks = 200, log = () => {} } = settings;
+  const { paceMs = 1200, pollMs = 250, timeoutMs = 30000, readyTimeoutMs = 60000, maxClicks = 200, log = () => {}, earlier } = settings;
   const dataPath = productDataPath(section);
   const dataTotals = [];
   let refused = null, clicks = 0, checks = 0, lastFacts = null, repeats = 0, lastRepeat = '', after = null, lastState = null;
@@ -322,10 +340,16 @@ export async function collectSection(page, section, settings = {}) {
         stopIfRefused(final);
         if (final.grids !== 1 || final.busy || final.buttons !== 0 || final.cards !== state.cards) throw new Error('Incomplete expansion: grid did not settle.');
         const totals = await Promise.all(dataTotals);
-        const html = await page.locator(GRID).evaluate(el => el.outerHTML);
+        const own = await page.locator(GRID).evaluate(el => el.outerHTML);
+        const html = earlier ? mergeGrids(own, earlier) : own;
         const products = gridProducts(html);
-        const expected = expectedTotal(products, clicks, totals, final.total);
         flushRepeats();
+        if (earlier) {
+          const pass = gridProducts(own);
+          note(`${section.name} pass 2: ${pass.unique} unique products in ${pass.cards} cards; with ${products.unique - pass.unique} more from pass 1 the section has ${products.unique}.`);
+        }
+        let expected;
+        try { expected = expectedTotal(products, clicks, totals, final.total); } catch (error) { if (error.short) error.grid = html; throw error; }
         note(`${section.name} complete: ${products.unique} of ${expected.total} unique products (${products.cards} cards, ${products.cards - products.unique} repeated) after ${clicks} View More clicks (${expected.note}).`);
         return html;
       }

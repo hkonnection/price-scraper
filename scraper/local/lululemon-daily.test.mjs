@@ -142,6 +142,42 @@ test('a refused first section stops before any pause, second context or publicat
   assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
 });
 
+/** Make a short-section error as the collector throws it. @param {string} grid Grid of the short pass. @returns {Error} Error. */
+function shortError(grid) { return Object.assign(new Error('Incomplete section: 1 of 2 unique products loaded (2 cards, 1 repeated; last product-data total).'), { short: true, grid }); }
+const PASS1 = '<div data-testid="product-grid"><div data-testid="product-tile"><a href="/p/test/one">Tank</a><span class="originalPrice">$100</span>$50</div></div>';
+
+test('a short section is re-paged once in a fresh context after the pause, with the first pass grid handed to the collector', async () => {
+  const f = fixture(); const settings = []; const capture = f.runtime.capture; let women = 0;
+  f.runtime.capture = async (page, section, options) => {
+    settings.push([section.name, options.earlier ?? null]);
+    if (section.name === 'Women' && ++women === 1) { f.calls.push(['capture', 'Women', page.context]); throw shortError(PASS1); }
+    return capture(page, section, options);
+  };
+  const result = await runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime);
+  assert.equal(result.stats.length, 3);
+  assert.deepEqual(settings, [['Women', null], ['Women', PASS1], ['Men', null], ['Accessories', null]]);
+  assert.deepEqual(f.calls.filter(c => ['context', 'context-close', 'sleep', 'capture'].includes(c[0])).slice(0, 8), [
+    ['context', 1], ['capture', 'Women', 1], ['context-close', 1], ['sleep', SECTION_PAUSE_MS], ['context', 2], ['capture', 'Women', 2], ['context-close', 2], ['sleep', SECTION_PAUSE_MS]]);
+  assert.ok(f.logs.includes('Women pass 1 short: Incomplete section: 1 of 2 unique products loaded (2 cards, 1 repeated; last product-data total). Re-paging Women once in a fresh browser context after 180 s; both passes are combined by product id.'), f.logs.join('\n'));
+  assert.equal(f.calls.filter(c => c[0] === 'workflow').length, 1);
+});
+
+test('a section still short after its one re-page stops the run without a third pass or publication; other stops are never re-paged', async () => {
+  const f = fixture(); let attempts = 0;
+  f.runtime.capture = async (page, section) => { f.visits.push(section.name); attempts++; throw shortError(PASS1); };
+  await assert.rejects(runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime), /1 of 2 unique products/);
+  assert.equal(attempts, 2); assert.deepEqual(f.visits, ['Women', 'Women']);
+  assert.equal(f.calls.some(c => ['release', 'workflow'].includes(c[0])), false);
+  assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
+  for (const error of [new Error('Collection refused by retailer: HTTP 429 /x. No publication.'), Object.assign(new Error('Incomplete section: a product-data response gave no product total.'), { grid: PASS1 }), Object.assign(new Error('short without grid'), { short: true })]) {
+    const g = fixture(); let tries = 0;
+    g.runtime.capture = async () => { tries++; throw error; };
+    await assert.rejects(runDaily({ outputDir: g.outputDir, publish: true, priorFiles: [] }, g.runtime));
+    assert.equal(tries, 1, error.message);
+    assert.equal(g.calls.some(c => c[0] === 'sleep'), false);
+  }
+});
+
 test('dry-run captures locally but never contacts GitHub or D1', async () => {
   const f = fixture(); const result = await runDaily({ outputDir: f.outputDir, publish: false, priorFiles: [] }, f.runtime);
   assert.equal(result.payload.deals.length, 1); assert.equal(f.calls.some(c => ['release', 'workflow'].includes(c[0])), false);

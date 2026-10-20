@@ -77,7 +77,8 @@ function github(args) {
     env: { HOME: os.homedir(), PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:' + path.join(os.homedir(), '.local', 'bin') }, timeout: 120000 });
 }
 
-/** Capture a complete set under an exclusive local lock, each section in its own fresh browser context with SECTION_PAUSE_MS between sections, validate with the saved publisher, then upload/dispatch exactly once. @param {object} options Validated options. @param {object} overrides Offline dependency injection (including sleep), not CLI flags. @returns {Promise<object>} Saved set and dispatch details. @throws {Error} On any incomplete capture, unsafe state or uncertain remote operation; never retries. */
+/** Capture a complete set under an exclusive local lock, each section in its own fresh browser context with SECTION_PAUSE_MS between sections
+ * (a section the collector reports short is re-paged once, after the same pause, and both passes are combined by product id), validate with the saved publisher, then upload/dispatch exactly once. @param {object} options Validated options. @param {object} overrides Offline dependency injection (including sleep), not CLI flags. @returns {Promise<object>} Saved set and dispatch details. @throws {Error} On any incomplete capture, unsafe state or uncertain remote operation; never retries. */
 export async function runDaily(options, overrides = {}) {
   const r = { now: () => new Date(), platform: process.platform, uid: process.getuid?.(), capture: collectSection,
     launch: async settings => (await import('playwright')).chromium.launch(settings), github, emit: console.log,
@@ -109,14 +110,22 @@ export async function runDaily(options, overrides = {}) {
     const captures = []; let capturedAt;
     for (const [index, section] of SECTIONS.entries()) {
       if (index) { emit(`Pausing ${SECTION_PAUSE_MS / 1000} s before ${section.name}.`); await r.sleep(SECTION_PAUSE_MS); }
-      // Fresh context per section: no cookies, cache or open page carried over from the previous section.
-      const context = await browser.newContext();
-      let html;
-      try {
-        const page = await context.newPage();
-        emit(`${section.name} page load at ${new Date().toISOString()} in a fresh browser context.`);
-        html = await r.capture(page, section, { log: emit });
-      } finally { await context.close().catch(() => {}); }
+      // Fresh context per pass: no cookies, cache or open page carried over from the previous section or pass.
+      // A clicked section short of unique products (offset paging over a list that changed while read) gets exactly one more pass.
+      let html, earlier;
+      for (let pass = 1; html === undefined; pass++) {
+        const context = await browser.newContext();
+        try {
+          const page = await context.newPage();
+          emit(`${section.name} page load at ${new Date().toISOString()} in a fresh browser context.`);
+          html = await r.capture(page, section, { log: emit, ...(earlier ? { earlier } : {}) });
+        } catch (error) {
+          if (pass > 1 || !error?.short || typeof error.grid !== 'string') throw error;
+          earlier = error.grid;
+          emit(`${section.name} pass 1 short: ${error.message} Re-paging ${section.name} once in a fresh browser context after ${SECTION_PAUSE_MS / 1000} s; both passes are combined by product id.`);
+        } finally { await context.close().catch(() => {}); }
+        if (html === undefined) await r.sleep(SECTION_PAUSE_MS);
+      }
       capturedAt = r.now().toISOString();
       const stem = section.name.toLowerCase();
       save(path.join(directory, 'raw', stem + '.html'), html);

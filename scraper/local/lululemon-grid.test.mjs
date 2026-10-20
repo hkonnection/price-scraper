@@ -499,3 +499,31 @@ test('503 cards with 21 repeats against a product-data total of 503 stops: only 
   await assert.rejects(collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }),
     { message: 'Incomplete section: 482 of 503 unique products loaded (503 cards, 21 repeated; last product-data total; product-data totals seen 503 in 1 responses; page total 522).' });
 });
+
+test('a short clicked section reports its grid so it can be re-paged; other stops are not marked short', async () => {
+  const shown = { ...initial, total: 3 }, done = { ...complete, cards: 3, total: 3 };
+  const short = fakePage([shown, done, done]); short.productData = 3; short.html = grid(tile('a') + tile('b') + tile('a'));
+  const error = await collectSection(short, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }).catch(caught => caught);
+  assert.equal(error.short, true); assert.equal(error.grid, short.html);
+  const missing = clickingPage([shown, done, done], [{ ...productData(SECTIONS[0].url, 0), json: async () => ({}) }]); missing.html = short.html;
+  assert.equal((await collectSection(missing, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }).catch(caught => caught)).short, undefined);
+  const noClick = { ...initial, cards: 3, total: 3, buttons: 0, visibleButtons: 0, enabled: false };
+  const repeated = fakePage([noClick, noClick]); repeated.html = short.html;
+  assert.equal((await collectSection(repeated, SECTIONS[2], { paceMs: 0, pollMs: 1, timeoutMs: 3 }).catch(caught => caught)).short, undefined);
+});
+
+test('a re-paged section combines both passes by store product id and is complete only when the union equals the last product-data total', async () => {
+  const shown = { ...initial, total: 6 }, done = { ...complete, cards: 6, total: 6 };
+  const earlier = grid(['a', 'b', 'c', 'd', 'a'].map(code => tile(code)).join(''));
+  const log = [];
+  const page = fakePage([shown, done, done]); page.productData = 6; page.html = grid(['a', 'b', 'c', 'e', 'f', 'c'].map(code => tile(code)).join(''));
+  const html = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, earlier, log: line => log.push(line) });
+  assert.deepEqual(gridProducts(html), { cards: 7, unique: 6 });
+  for (const code of ['a', 'b', 'c', 'd', 'e', 'f']) assert.match(html, new RegExp(`/p/test/${code}\\?`));
+  assert.ok(log.includes('Women pass 2: 5 unique products in 6 cards; with 1 more from pass 1 the section has 6.'), log.join('\n'));
+  assert.equal(log.at(-1), 'Women complete: 6 of 6 unique products (7 cards, 1 repeated) after 1 View More clicks (last product-data total; product-data totals seen 6 in 1 responses; page total 6).');
+  const still = fakePage([shown, done, done]); still.productData = 7; still.html = page.html;
+  const error = await collectSection(still, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50, earlier }).catch(caught => caught);
+  assert.equal(error.message, 'Incomplete section: 6 of 7 unique products loaded (7 cards, 1 repeated; last product-data total; product-data totals seen 7 in 1 responses; page total 6).');
+  assert.equal(error.short, true);
+});
