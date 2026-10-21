@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import { parseArgs, runDaily } from './lululemon-daily.mjs';
+import { parseArgs, runDaily, SECTION_PAUSE_MS, SECTION_PASSES } from './lululemon-daily.mjs';
 import { loadDeals, main as savedMain } from './publish-lululemon.mjs';
 import { SECTIONS } from './lululemon-grid.mjs';
 
@@ -15,11 +15,13 @@ const at = '2026-10-11T15:02:03.456Z';
 function fixture(changes = {}) {
   fs.mkdirSync(artifacts, { recursive: true, mode: 0o700 });
   const outputDir = fs.mkdtempSync(path.join(artifacts, 'daily-'));
-  const calls = [], visits = [], logs = [];
-  const browser = { newPage: async () => ({}), close: async () => { calls.push(['close']); } };
+  const calls = [], visits = [], logs = []; let contexts = 0;
+  const browser = { close: async () => { calls.push(['close']); },
+    newContext: async () => { const id = ++contexts; calls.push(['context', id]); return { newPage: async () => ({ context: id }), close: async () => { calls.push(['context-close', id]); } }; } };
   const runtime = { now: () => new Date(at), platform: 'darwin', uid: process.getuid(), workflowText: 'on:\n  workflow_dispatch:\n    inputs:\n      captured_at:\n        type: string\n', emit: line => logs.push(line),
     launch: async options => { calls.push(['launch', options]); return browser; },
-    capture: async (page, section) => { visits.push(section.name); return `<div data-testid="product-grid"><div data-testid="product-tile"><a href="/p/test/same">${section.name === 'Accessories' ? 'Bag' : 'Unknown'}</a><span class="originalPrice">$100</span>$50</div></div>`; },
+    sleep: async ms => { calls.push(['sleep', ms]); },
+    capture: async (page, section) => { visits.push(section.name); calls.push(['capture', section.name, page.context]); return `<div data-testid="product-grid"><div data-testid="product-tile"><a href="/p/test/same">${section.name === 'Accessories' ? 'Bag' : 'Unknown'}</a><span class="originalPrice">$100</span>$50</div></div>`; },
     github: async args => { calls.push(args); return { status: 0 }; },
     ...changes,
   };
@@ -110,6 +112,84 @@ test('backwards capture clock prevents release upload or dispatch', async () => 
   assert.equal(f.calls.some(c => ['release', 'workflow'].includes(c[0])), false);
 });
 
+test('each section loads in its own fresh browser context, closed before a named pause of a few minutes', async () => {
+  assert.equal(SECTION_PAUSE_MS, 180000);
+  const f = fixture();
+  await runDaily({ outputDir: f.outputDir, publish: false, priorFiles: [] }, f.runtime);
+  assert.deepEqual(f.calls.filter(c => c[0] !== 'launch'), [
+    ['context', 1], ['capture', 'Women', 1], ['context-close', 1], ['sleep', SECTION_PAUSE_MS],
+    ['context', 2], ['capture', 'Men', 2], ['context-close', 2], ['sleep', SECTION_PAUSE_MS],
+    ['context', 3], ['capture', 'Accessories', 3], ['context-close', 3], ['close'],
+  ]);
+  assert.equal(f.logs.filter(line => /^Pausing 180 s before (Men|Accessories)\.$/.test(line)).length, 2);
+  assert.deepEqual(f.logs.filter(line => / page load at \d{4}-\d{2}-\d{2}T/.test(line)).map(line => line.split(' ')[0]), ['Women', 'Men', 'Accessories']);
+});
+
+test('the collector receives the run.log writer so expansion detail lands in run.log', async () => {
+  const f = fixture(); const capture = f.runtime.capture;
+  f.runtime.capture = async (page, section, settings) => { settings.log(`${section.name} View More click 1 at 40 cards.`); return capture(page, section); };
+  const result = await runDaily({ outputDir: f.outputDir, publish: false, priorFiles: [] }, f.runtime);
+  const runLog = fs.readFileSync(path.join(result.directory, 'run.log'), 'utf8');
+  for (const name of ['Women', 'Men', 'Accessories']) assert.match(runLog, new RegExp(`^${name} View More click 1 at 40 cards\\.$`, 'm'));
+});
+
+test('a refused first section stops before any pause, second context or publication', async () => {
+  const f = fixture();
+  f.runtime.capture = async (page, section) => { f.visits.push(section.name); throw new Error('Collection refused: HTTP 400.'); };
+  await assert.rejects(runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime), /HTTP 400/);
+  assert.deepEqual(f.visits, ['Women']);
+  assert.deepEqual(f.calls.filter(c => c[0] !== 'launch'), [['context', 1], ['context-close', 1], ['close']]);
+  assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
+});
+
+/** Make a short-section error as the collector throws it. @param {string} grid Grid of the short pass. @returns {Error} Error. */
+function shortError(grid) { return Object.assign(new Error('Incomplete section: 1 of 2 unique products loaded (2 cards, 1 repeated; last product-data total).'), { short: true, grid }); }
+/** One pass only: with no further pass allowed, a short section stops after its first pass. */
+test('with no further pass allowed, 502 unique against a total of 503 after one pass stops the run', async () => {
+  const f = fixture(); let attempts = 0;
+  f.runtime.sectionPasses = 1;
+  f.runtime.capture = async () => { attempts++; throw Object.assign(new Error('Incomplete section: 502 of 503 unique products loaded (503 cards, 1 repeated; last product-data total).'), { short: true, grid: '<div data-testid="product-grid"></div>' }); };
+  await assert.rejects(runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime), /502 of 503 unique products/);
+  assert.equal(attempts, 1); assert.equal(f.calls.some(c => c[0] === 'sleep' || c[0] === 'workflow'), false);
+});
+
+const PASS1 = '<div data-testid="product-grid"><div data-testid="product-tile"><a href="/p/test/one">Tank</a><span class="originalPrice">$100</span>$50</div></div>';
+
+test('a short section is re-paged in a fresh context after the pause, with the grid so far handed to the collector, and stops paging once complete', async () => {
+  const f = fixture(); const settings = []; const capture = f.runtime.capture; let women = 0;
+  f.runtime.capture = async (page, section, options) => {
+    settings.push([section.name, options.earlier ?? null]);
+    if (section.name === 'Women' && ++women === 1) { f.calls.push(['capture', 'Women', page.context]); throw shortError(PASS1); }
+    return capture(page, section, options);
+  };
+  const result = await runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime);
+  assert.equal(result.stats.length, 3);
+  assert.deepEqual(settings, [['Women', null], ['Women', PASS1], ['Men', null], ['Accessories', null]]);
+  assert.deepEqual(f.calls.filter(c => ['context', 'context-close', 'sleep', 'capture'].includes(c[0])).slice(0, 8), [
+    ['context', 1], ['capture', 'Women', 1], ['context-close', 1], ['sleep', SECTION_PAUSE_MS], ['context', 2], ['capture', 'Women', 2], ['context-close', 2], ['sleep', SECTION_PAUSE_MS]]);
+  assert.ok(f.logs.includes('Women pass 1 short: Incomplete section: 1 of 2 unique products loaded (2 cards, 1 repeated; last product-data total). Re-paging Women in a fresh browser context after 180 s (pass 2 of 3); all passes are combined by product id.'), f.logs.join('\n'));
+  assert.equal(f.calls.filter(c => c[0] === 'workflow').length, 1);
+});
+
+test('3 passes ending below the final product-data total stop the run without a fourth pass or publication; other stops are never re-paged', async () => {
+  assert.equal(SECTION_PASSES, 3);
+  const f = fixture(); let attempts = 0; const grids = [];
+  f.runtime.capture = async (page, section, options) => { f.visits.push(section.name); grids.push(options.earlier ?? null); attempts++; throw shortError(PASS1 + attempts); };
+  await assert.rejects(runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime), /1 of 2 unique products/);
+  assert.equal(attempts, 3); assert.deepEqual(f.visits, ['Women', 'Women', 'Women']);
+  assert.deepEqual(grids, [null, PASS1 + 1, PASS1 + 2]);
+  assert.equal(f.calls.filter(c => c[0] === 'sleep').length, 2);
+  assert.equal(f.calls.some(c => ['release', 'workflow'].includes(c[0])), false);
+  assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
+  for (const error of [new Error('Collection refused by retailer: HTTP 429 /x. No publication.'), Object.assign(new Error('Incomplete section: a product-data response gave no product total.'), { grid: PASS1 }), Object.assign(new Error('short without grid'), { short: true })]) {
+    const g = fixture(); let tries = 0;
+    g.runtime.capture = async () => { tries++; throw error; };
+    await assert.rejects(runDaily({ outputDir: g.outputDir, publish: true, priorFiles: [] }, g.runtime));
+    assert.equal(tries, 1, error.message);
+    assert.equal(g.calls.some(c => c[0] === 'sleep'), false);
+  }
+});
+
 test('dry-run captures locally but never contacts GitHub or D1', async () => {
   const f = fixture(); const result = await runDaily({ outputDir: f.outputDir, publish: false, priorFiles: [] }, f.runtime);
   assert.equal(result.payload.deals.length, 1); assert.equal(f.calls.some(c => ['release', 'workflow'].includes(c[0])), false);
@@ -130,6 +210,8 @@ test('first refusal, missing/empty capture, malformed data and stalled expansion
     };
     await assert.rejects(runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime));
     assert.deepEqual(f.visits, ['Women', 'Men']); assert.equal(f.calls.some(c => ['release', 'workflow'].includes(c[0])), false);
+    assert.deepEqual(f.calls.filter(c => c[0] === 'sleep'), [['sleep', SECTION_PAUSE_MS]], 'no pause or third section after the first failure');
+    assert.deepEqual(f.calls.filter(c => c[0] === 'context-close'), [['context-close', 1], ['context-close', 2]]);
     assert.equal(f.calls.filter(c => c[0] === 'close').length, 1); assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
     const folder = fs.readdirSync(f.outputDir).find(n => n.startsWith('capture-'));
     assert.equal(fs.existsSync(path.join(f.outputDir, folder, 'publish', 'combined.json')), false);
