@@ -88,7 +88,7 @@ function productData(sectionUrl, total, offset = 40) {
 function fakePage(states, status = 200) {
   let index = 0, clicked = false;
   const trace = [], listeners = {};
-  const page = { trace, on: (event, fn) => { (listeners[event] ||= []).push(fn); }, off: () => {}, url: () => trace[0] ?? 'about:blank',
+  const page = { trace, frames: () => [], mainFrame: () => null, on: (event, fn) => { (listeners[event] ||= []).push(fn); }, off: () => {}, url: () => trace[0] ?? 'about:blank',
     emit: (event, value) => (listeners[event] || []).forEach(fn => fn(value)),
     goto: async url => { trace.push(url); return { status: () => status, ok: () => status === 200 }; },
     evaluate: async () => { const result = states[index]; if (clicked && index < states.length - 1) index++; return result; },
@@ -136,6 +136,99 @@ test('Press & Hold rendered body, title and missing-body title stop without clic
     }
   }
   assert.equal(renderedFacts('Shop sale shirts and bags').refusal, false);
+});
+
+/** Require passive child-frame detection without interacting with challenge controls or leaking frame data. */
+test('frame-only Press & Hold stops before listing clicks and ignores detached frames', async () => {
+  for (const afterClick of [false, true]) {
+    const page = fakePage(afterClick ? [initial, complete] : [initial]);
+    const top = { evaluate: async () => { throw Error('main frame must not be read twice'); } };
+    const detached = { evaluate: async () => { throw Error('detached frame with private visitor URL'); } };
+    let frameReads = 0;
+    const challenge = { evaluate: async (reader, options) => {
+      assert.equal(reader, readUiFacts);
+      assert.deepEqual(options, { refusalOnly: true });
+      frameReads++;
+      return renderedFacts(afterClick && !page.trace.includes('click') ? 'Ordinary embedded content' : 'Press & Hold');
+    } };
+    page.mainFrame = () => top;
+    page.frames = () => [top, detached, challenge];
+    const error = await collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(caught => caught);
+    assert.equal(error.challenge, 'press-and-hold');
+    assert.equal(error.short, undefined);
+    assert.doesNotMatch(error.message, /private|visitor/);
+    assert.equal(page.trace.filter(item => item === 'click').length, afterClick ? 1 : 0);
+    assert.ok(frameReads > 0);
+    assert.equal(initial.refusal, false, 'frame results must not mutate the listing snapshot');
+    assert.equal(initial.challenge, undefined);
+  }
+});
+
+/** Keep detached or ordinary child frames from rejecting an otherwise complete listing. */
+test('ordinary and detached child frames do not change positive listing completion', async () => {
+  const page = fakePage([initial, complete]);
+  page.frames = () => [{ evaluate: async () => { throw Error('Frame was detached'); } }, { evaluate: async () => ({ refusal: false }) }];
+  assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }), /product-grid/);
+});
+
+/** Use only frame title and rendered text when no listing state is requested. */
+test('frame refusal reader needs no grid, product, or link DOM query', () => {
+  const saved = globalThis.document;
+  try {
+    globalThis.document = { title: '', body: { innerText: 'Press & Hold' },
+      querySelectorAll: () => { throw Error('frame DOM query forbidden'); } };
+    assert.deepEqual(readUiFacts({ refusalOnly: true }), { refusal: true, challenge: 'press-and-hold' });
+  } finally { globalThis.document = saved; }
+});
+
+/** Preserve an already observed refusal when navigation, evaluation or click fails next. */
+test('recorded refusal survives a failed browser call with bounded metadata', async () => {
+  for (const failedCall of ['goto', 'evaluate', 'click']) {
+    const page = fakePage([initial]);
+    const blocked = response('https://shop.lululemon.com/blocked?private-visitor=secret', 403, 'document');
+    const failure = Object.assign(new Error('Execution context destroyed <iframe src="private-visitor-secret">'), { short: true, grid: 'private HTML' });
+    if (failedCall === 'goto') page.goto = async () => { page.emit('response', blocked); throw failure; };
+    else {
+      const locator = page.locator;
+      page.locator = selector => ({ ...locator(selector), click: async () => {
+        page.emit('response', blocked);
+        if (failedCall === 'click') throw failure;
+        page.evaluate = async () => { throw failure; };
+      } });
+    }
+    const error = await collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(caught => caught);
+    assert.equal(error.challenge, 'retailer-refusal', failedCall);
+    assert.equal(error.short, undefined);
+    assert.match(error.message, /HTTP 403 \/blocked/);
+    assert.doesNotMatch(error.message, /private|secret|iframe|context/);
+  }
+});
+
+/** Recognize narrowly related challenge spelling and human-verification variants. */
+test('review challenge wording variants refuse without listing interaction', async t => {
+  for (const [text, kind] of [
+    ['Press-and-Hold', 'press-and-hold'], ['Press ＆ Hold', 'press-and-hold'], ['Press\u200b & Hold', 'press-and-hold'],
+    ['Please verify you are a human', 'retailer-refusal'], ['Access to this page has been denied', 'retailer-refusal'],
+    ['Are you a robot? Complete the check to continue.', 'retailer-refusal'],
+  ]) await t.test(text, async () => {
+    for (const facts of [renderedFacts(text), renderedFacts('', text, false)]) {
+      assert.equal(facts.refusal, true, text);
+      const page = fakePage([facts]);
+      const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2, readyTimeoutMs: 2 }).catch(caught => caught);
+      assert.equal(error.challenge, kind, text);
+      assert.deepEqual(page.trace, [SECTIONS[0].url]);
+    }
+  });
+});
+
+/** Refuse zero product-data totals after Show More rather than certifying positive captures. */
+test('zero total after Show More cannot certify a section or trigger re-paging', async () => {
+  for (const totals of [[0], [120, 0], [0, 2]]) assert.throws(() => expectedTotal({ cards: 2, unique: 2 }, totals.length, totals, 2), /no product total/i);
+  const page = fakePage([initial, complete]); page.productData = 0;
+  const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(caught => caught);
+  assert.match(error.message, /no product total/i);
+  assert.equal(error.short, undefined);
+  assert.equal(expectedTotal({ cards: 3, unique: 3 }, 1, [2], 3).total, 2);
 });
 
 /** Verify challenge detection at every interaction boundary. */

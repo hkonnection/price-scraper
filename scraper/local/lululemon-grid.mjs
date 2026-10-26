@@ -136,22 +136,35 @@ export function combineSections(captures, at) {
   return { payload: { deals, totalProducts: deals.length, sections: SECTIONS.map(({ name }) => ({ name, dealCount: [...owners.values()].filter(owner => owner === name).length })) }, stats };
 }
 
-/** Read only UI status, not product data or network payloads. @param {import('playwright').Page} page Browser page. @returns {Promise<object>} Expansion/refusal status. */
+/** Read listing status and passively inspect child-frame refusal text, never frame controls or URLs. @param {import('playwright').Page} page Browser page. @returns {Promise<object>} Expansion/refusal status. @throws {Error} On a main-page read failure; detached child-frame reads are ignored. */
 async function uiState(page) {
-  return classifyUiState(await page.evaluate(readUiFacts));
+  let raw = await page.evaluate(readUiFacts, { refusalOnly: false });
+  if (!raw.refusal) for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    let facts;
+    try { facts = await frame.evaluate(readUiFacts, { refusalOnly: true }); }
+    catch { continue; } // A detached or navigating child frame has no readable refusal text yet.
+    if (facts.refusal) {
+      raw = { ...raw, refusal: true, ...(facts.challenge === 'press-and-hold' ? { challenge: 'press-and-hold' } : {}) };
+      break;
+    }
+  }
+  return classifyUiState(raw);
 }
 
 /** Runs inside the page: read UI facts only. A document without a body yet (mid-navigation) reads as not settled.
  * `link.handled` says whether the page script has taken over the View More link: React puts its props on every element it has hydrated.
  * Before that, a click on the server-rendered link is an ordinary navigation to `?page=2` and no product-data request is sent.
  * Press & Hold is a refusal, never an interaction target. Only its bounded kind leaves the reader, not the rendered text.
- * @returns {object} Raw UI facts with optional challenge kind.
+ * @param {object} [options={}] Reader mode. @param {boolean} [options.refusalOnly=false] Read only title and rendered refusal text for a child frame.
+ * @returns {object} Raw UI facts with optional challenge kind, or bounded refusal facts only.
  */
-export function readUiFacts() {
-    const refusalText = /access denied|request blocked|verify (?:that )?you are human|unusual traffic|captcha|security challenge|temporarily blocked|pardon our interruption/i;
+export function readUiFacts({ refusalOnly = false } = {}) {
+    const refusalText = /access denied|access to this page has been denied|request blocked|verify (?:that )?you are (?:a )?human|are you a robot\?|unusual traffic|captcha|security challenge|temporarily blocked|pardon our interruption/i;
     const text = (document.title || '') + ' ' + (document.body?.innerText || '');
-    const challenge = /\bpress\s*(?:&|and)\s*hold\b/i.test(text) ? { challenge: 'press-and-hold' } : {};
+    const challenge = /\bpress[\s\u200b-]*(?:&|\uFF06|and)[\s\u200b-]*hold\b/i.test(text) ? { challenge: 'press-and-hold' } : {};
     const refusal = refusalText.test(text) || Boolean(challenge.challenge);
+    if (refusalOnly) return { refusal, ...challenge };
     if (!document.body) return { grids: 0, cards: 0, total: null, buttons: 0, visibleButtons: 0, enabled: false, indicators: [], refusal, ...challenge };
     /** Test ordinary rendered visibility. @param {Element} el Element. @returns {boolean} Visible. */
     function visible(el) { return Boolean(el.getClientRects().length) && getComputedStyle(el).visibility !== 'hidden'; }
@@ -220,7 +233,7 @@ function pageAt(href) {
  * and the product-data total moves while the list changes, so the latest one counts. Only distinct store product ids count: offset
  * paging over a list that changes while it is read repeats some cards and skips other products. After clicks the section is complete
  * when its unique products (across all passes) are at least that total; products that left the list between passes can make the union
- * larger. A missing, negative or unsafe-integer product-data total, or no product-data response at all, stops the section. Without a click the
+ * larger. A missing, zero, negative or unsafe-integer product-data total, or no product-data response at all, stops the section. Without a click the
  * unique products must equal the embedded total, which describes the same server-rendered page as the tiles.
  * @param {object} products `cards` loaded and `unique` distinct product ids among them (gridProducts). @param {number} clicks View More clicks made. @param {Array<number|null>} dataTotals Totals read from product-data responses in arrival order (null when unreadable).
  * @param {number|null} pageTotal Embedded page total, for comparison. @returns {object} `total` to match and `note`, the totals seen for run.log.
@@ -233,7 +246,7 @@ export function expectedTotal({ cards, unique }, clicks, dataTotals, pageTotal) 
     return { total: pageTotal, note: `page total, no product-data request; ${shown}` };
   }
   if (!dataTotals.length) throw new Error(`Incomplete section: no product-data response after ${clicks} View More clicks (${cards} cards loaded; ${shown}).`);
-  if (dataTotals.some(total => !Number.isSafeInteger(total) || total < 0)) throw new Error(`Incomplete section: a product-data response gave no product total (${cards} cards loaded; ${shown}).`);
+  if (dataTotals.some(total => !Number.isSafeInteger(total) || total < 1)) throw new Error(`Incomplete section: a product-data response gave no product total (${cards} cards loaded; ${shown}).`);
   const total = dataTotals.at(-1);
   const note = `last product-data total; product-data totals seen ${[...new Set(dataTotals)].join(', ')} in ${dataTotals.length} responses; ${shown}`;
   if (unique < total) throw Object.assign(new Error(`Incomplete section: ${unique} of ${total} unique products loaded (${counted}; ${note}).`), { short: true });
@@ -373,6 +386,10 @@ export async function collectSection(page, section, settings = {}) {
       after = { click: clicks, url: currentAt(), cards: beforeClick.cards, timeOrigin: beforeClick.timeOrigin, navigations: 0, loads: 0, contentLoads: 0, retailer: {}, otherHosts: 0 };
       await page.locator(VIEW_MORE).click({ timeout: timeoutMs });
     }
+  } catch (error) {
+    // A recorded retailer refusal outranks a later navigation, evaluation or click failure.
+    if (refused && !error?.challenge) throw Object.assign(new Error(`Collection refused by retailer: ${refused}. No publication.`), { challenge: 'retailer-refusal' });
+    throw error;
   } finally {
     reportAfterClick(lastState); flushRepeats();
     page.off('response', onResponse); page.off('framenavigated', onNavigated); page.off('load', onLoad); page.off('domcontentloaded', onContentLoaded);
