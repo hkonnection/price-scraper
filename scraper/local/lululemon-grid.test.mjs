@@ -143,7 +143,7 @@ test('frame-only Press & Hold stops before listing clicks and ignores detached f
   for (const afterClick of [false, true]) {
     const page = fakePage(afterClick ? [initial, complete] : [initial]);
     const top = { evaluate: async () => { throw Error('main frame must not be read twice'); } };
-    const detached = { evaluate: async () => { throw Error('detached frame with private visitor URL'); } };
+    const detached = { isDetached: () => true, evaluate: async () => { throw Error('detached frame with private visitor URL'); } };
     let frameReads = 0;
     const challenge = { evaluate: async (reader, options) => {
       assert.equal(reader, readUiFacts);
@@ -167,8 +167,124 @@ test('frame-only Press & Hold stops before listing clicks and ignores detached f
 /** Keep detached or ordinary child frames from rejecting an otherwise complete listing. */
 test('ordinary and detached child frames do not change positive listing completion', async () => {
   const page = fakePage([initial, complete]);
-  page.frames = () => [{ evaluate: async () => { throw Error('Frame was detached'); } }, { evaluate: async () => ({ refusal: false }) }];
+  page.frames = () => [{ isDetached: () => true, evaluate: async () => { throw Error('Frame was detached'); } }, { isDetached: () => false, evaluate: async () => ({ refusal: false }) }];
   assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }), /product-grid/);
+});
+
+/** Bound pending frame work before and after listing interaction without mistaking unreadability for safety. */
+test('passive inspection deadline stops pending frames without a retry', async t => {
+  for (const mode of ['pending-navigation', 'busy-frame', 'after-click', 'renavigation']) await t.test(mode, async () => {
+    const page = fakePage([initial, complete]);
+    let frameReads = 0, guard;
+    const frame = { isDetached: () => false, evaluate: async () => {
+      frameReads++;
+      if (['after-click', 'renavigation'].includes(mode) && !page.trace.includes('click')) return { refusal: false };
+      return new Promise(() => {});
+    } };
+    page.frames = () => [frame];
+    const started = performance.now();
+    const failure = await Promise.race([
+      collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error),
+      new Promise(resolve => { guard = setTimeout(() => resolve(Error('test guard: collector did not return')), 3200); }),
+    ]).finally(() => clearTimeout(guard));
+    assert.equal(failure.challenge, 'retailer-refusal');
+    assert.equal(failure.short, undefined);
+    assert.ok(performance.now() - started < 3000, 'passive inspection must have a bounded exit');
+    assert.equal(page.trace.filter(value => value === 'click').length, ['after-click', 'renavigation'].includes(mode) ? 1 : 0);
+    assert.equal(frameReads, ['after-click', 'renavigation'].includes(mode) ? 3 : 1);
+    assert.doesNotMatch(failure.message, /private|iframe|https?:/);
+  });
+});
+
+/** Apply one aggregate deadline rather than granting a new full timeout to every frame. */
+test('passive inspection shares its deadline across ordinary slow frames', async () => {
+  const page = fakePage([initial, complete]);
+  let reads = 0;
+  const pending = [];
+  page.frames = () => Array.from({ length: 4 }, () => ({ isDetached: () => false, evaluate: () => {
+    reads++;
+    return new Promise(resolve => { pending.push(setTimeout(() => resolve({ refusal: false }), 1100)); });
+  } }));
+  const started = performance.now();
+  let error;
+  try { error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error); }
+  finally { for (const timer of pending) clearTimeout(timer); }
+  assert.equal(error.challenge, 'retailer-refusal');
+  assert.equal(reads, 2);
+  assert.ok(performance.now() - started < 2800);
+  assert.equal(page.trace.includes('click'), false);
+});
+
+/** Clear deadline timers and consume a frame rejection that arrives after collection has stopped. */
+test('passive deadline clears timers and consumes late evaluation rejection', async t => {
+  const page = fakePage([initial]);
+  let rejectLate;
+  const outstanding = new Set();
+  const start = globalThis.setTimeout, clear = globalThis.clearTimeout;
+  t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => {
+    const timer = start(callback, ms, ...args); outstanding.add(timer); return timer;
+  });
+  t.mock.method(globalThis, 'clearTimeout', timer => { outstanding.delete(timer); return clear(timer); });
+  page.frames = () => [{ isDetached: () => false, evaluate: () => new Promise((_, reject) => { rejectLate = reject; }) }];
+  const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error);
+  assert.equal(error.challenge, 'retailer-refusal');
+  assert.equal(outstanding.size, 0);
+  rejectLate(Error('private late frame error'));
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+});
+
+/** Bound the main document too, including the one inspection permitted after a failed click. */
+test('failed listing click passive inspection deadline cannot hang on the main document', async () => {
+  const page = fakePage([initial]);
+  let failed = false, attempts = 0;
+  page.evaluate = async () => failed ? new Promise(() => {}) : initial;
+  const locator = page.locator;
+  page.locator = selector => ({ ...locator(selector), click: async () => { failed = true; attempts++; throw Error('click timed out'); } });
+  const started = performance.now();
+  const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error);
+  assert.equal(error.challenge, 'retailer-refusal');
+  assert.equal(attempts, 1);
+  assert.ok(performance.now() - started < 2800);
+});
+
+/** Stop on unknown frame read failures rather than silently skipping a possible challenge. */
+test('unreadable non-detached frame fails closed even when its error claims detachment', async () => {
+  const page = fakePage([initial, complete]);
+  page.frames = () => [{ isDetached: () => false, evaluate: async () => { throw Error('Frame was detached private visitor URL'); } }];
+  const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error);
+  assert.equal(error.challenge, 'retailer-refusal');
+  assert.doesNotMatch(error.message, /private|visitor|detached/);
+  assert.equal(page.trace.includes('click'), false);
+});
+
+/** Inspect once after a failed listing click, without retrying the click or masking an ordinary failure. */
+test('failed listing click receives one passive refusal inspection and no click retry', async () => {
+  for (const mode of ['frame', 'main', 'ordinary', 'read-failure']) {
+    const page = fakePage([initial]);
+    const clickError = Error('Original listing click timed out');
+    let failed = false, attempts = 0, readsAfter = 0, frameReadsAfter = 0;
+    page.evaluate = async () => {
+      if (failed) {
+        readsAfter++;
+        if (mode === 'read-failure') throw Error('Temporary navigation failure');
+        if (mode === 'main') return { ...initial, refusal: true, challenge: 'press-and-hold' };
+      }
+      return initial;
+    };
+    page.frames = () => mode === 'frame' && failed ? [{ isDetached: () => false, evaluate: async () => {
+      frameReadsAfter++;
+      return { refusal: true, challenge: 'press-and-hold' };
+    } }] : [];
+    const locator = page.locator;
+    page.locator = selector => ({ ...locator(selector), click: async () => { attempts++; failed = true; throw clickError; } });
+    const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error);
+    assert.equal(attempts, 1, mode);
+    assert.equal(readsAfter, 1, mode);
+    assert.equal(frameReadsAfter, mode === 'frame' ? 1 : 0);
+    if (['frame', 'main'].includes(mode)) assert.equal(error.challenge, 'press-and-hold', mode);
+    else assert.equal(error, clickError, mode);
+  }
 });
 
 /** Use only frame title and rendered text when no listing state is requested. */

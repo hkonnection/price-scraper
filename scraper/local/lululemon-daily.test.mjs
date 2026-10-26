@@ -224,6 +224,43 @@ test('notice write failure needs no follow-up logger to preserve the refusal', a
   assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
 });
 
+/** Keep notice channels independent and retain the original refusal when some or all logging writes fail. */
+test('human notice logging failure preserves refusal and independently writable JSON', async t => {
+  for (const mode of ['human-log', 'emitter', 'all-log', 'both-channels']) await t.test(mode, async sub => {
+    const f = fixture();
+    await runDaily({ outputDir: f.outputDir, publish: false, priorFiles: [] }, f.runtime);
+    const latest = fs.readFileSync(path.join(f.outputDir, 'latest.json'));
+    f.calls.length = 0; f.visits.length = 0;
+    const refusal = Object.assign(Error('Collection refused by retailer. No publication.'), { challenge: 'press-and-hold' });
+    f.runtime.capture = async (_page, section) => { f.visits.push(section.name); throw refusal; };
+    const write = fs.writeSync, save = fs.writeFileSync;
+    let failedLog;
+    sub.mock.method(fs, 'writeSync', (fd, data, ...args) => {
+      if (String(data).startsWith('Human attention required:') && mode !== 'emitter') failedLog = fd;
+      if (fd === failedLog && (String(data).startsWith('Human attention required:') || ['all-log', 'both-channels'].includes(mode))) throw Object.assign(Error('private log EIO'), { code: 'EIO' });
+      return write(fd, data, ...args);
+    });
+    if (mode === 'both-channels') sub.mock.method(fs, 'writeFileSync', (file, ...args) => {
+      if (String(file).endsWith('challenge.json')) throw Object.assign(Error('private notice ENOSPC'), { code: 'ENOSPC' });
+      return save(file, ...args);
+    });
+    if (mode === 'emitter') f.runtime.emit = line => { if (line.startsWith('Human attention required:')) throw Error('private emitter failure'); };
+    const error = await runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime).catch(error => error);
+    assert.equal(error, refusal, mode);
+    const dirs = fs.readdirSync(f.outputDir).filter(name => name.startsWith('capture-'));
+    const notices = dirs.map(dir => path.join(f.outputDir, dir, 'challenge.json')).filter(file => fs.existsSync(file));
+    assert.equal(notices.length, mode === 'both-channels' ? 0 : 1);
+    for (const file of notices) {
+      assert.deepEqual(JSON.parse(fs.readFileSync(file)), { section: 'Women', detected_at: at, kind: 'press-and-hold', requires_human: true });
+      assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    }
+    assert.deepEqual(f.visits, ['Women']);
+    assert.equal(f.calls.some(call => ['release', 'workflow', 'sleep'].includes(call[0])), false);
+    assert.deepEqual(fs.readFileSync(path.join(f.outputDir, 'latest.json')), latest);
+    assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
+  });
+});
+
 /** Reproduce a recorded HTTP refusal followed by a navigation failure through the actual collector and daily notice path. */
 test('daily recorded-response navigation failure saves a bounded challenge notice', async () => {
   const f = fixture();

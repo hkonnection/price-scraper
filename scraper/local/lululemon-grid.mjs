@@ -136,14 +136,33 @@ export function combineSections(captures, at) {
   return { payload: { deals, totalProducts: deals.length, sections: SECTIONS.map(({ name }) => ({ name, dealCount: [...owners.values()].filter(owner => owner === name).length })) }, stats };
 }
 
-/** Read listing status and passively inspect child-frame refusal text, never frame controls or URLs. @param {import('playwright').Page} page Browser page. @returns {Promise<object>} Expansion/refusal status. @throws {Error} On a main-page read failure; detached child-frame reads are ignored. */
+/** Total budget for one passive UI inspection, not a timeout that skips unreadable frames. */
+const UI_READ_MS = 2000;
+
+/** Read listing and child-frame refusal facts within one shared budget, never frame controls or URLs. @param {import('playwright').Page} page Browser page. @returns {Promise<object>} Expansion/refusal status. @throws {Error} With bounded human-attention metadata on a deadline or unreadable attached frame; proven detachments are ignored. */
 async function uiState(page) {
-  let raw = await page.evaluate(readUiFacts, { refusalOnly: false });
+  const deadline = performance.now() + UI_READ_MS;
+  /** Stop when passive inspection cannot establish safety, without copying browser diagnostics. @returns {Error} Bounded refusal. */
+  function unreadable() { return Object.assign(new Error('Collection stopped: passive refusal inspection unavailable. Human attention required. No publication.'), { challenge: 'retailer-refusal' }); }
+  /** Bound one read by the remaining shared budget; race handlers consume late rejections and the timer is always cleared. @param {import('playwright').Page|import('playwright').Frame} target Document. @param {boolean} refusalOnly Child-frame mode. @returns {Promise<object>} UI facts. @throws {Error} On a deadline or failed evaluation. */
+  async function read(target, refusalOnly) {
+    let timer;
+    try {
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) throw unreadable();
+      return await Promise.race([target.evaluate(readUiFacts, { refusalOnly }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(unreadable()), remaining); })]);
+    } finally { clearTimeout(timer); }
+  }
+  let raw = await read(page, false);
   if (!raw.refusal) for (const frame of page.frames()) {
     if (frame === page.mainFrame()) continue;
     let facts;
-    try { facts = await frame.evaluate(readUiFacts, { refusalOnly: true }); }
-    catch { continue; } // A detached or navigating child frame has no readable refusal text yet.
+    try { facts = await read(frame, true); }
+    catch {
+      if (frame.isDetached?.() === true) continue;
+      throw unreadable(); // A navigating or timed-out frame may contain a challenge.
+    }
     if (facts.refusal) {
       raw = { ...raw, refusal: true, ...(facts.challenge === 'press-and-hold' ? { challenge: 'press-and-hold' } : {}) };
       break;
@@ -270,7 +289,7 @@ export function productDataPath(section) { return PRODUCT_DATA_PATH + new URL(se
  * @param {object} section Official section.
  * @param {object} settings Bounded waits (overridable for offline tests only: timeoutMs after a click, readyTimeoutMs before the first), `log`, the run.log writer, and optional `earlier` grid HTML.
  * @returns {Promise<string>} Complete grid HTML.
- * @throws {Error} On refusal (with a bounded challenge kind), empty/missing grid, stalled loading or expansion.
+ * @throws {Error} On refusal or unreadable passive inspection (with a bounded challenge kind), empty/missing grid, stalled loading or expansion. A failed listing click permits one bounded passive inspection, never a click retry.
  */
 export async function collectSection(page, section, settings = {}) {
   const { paceMs = 1200, pollMs = 250, timeoutMs = 30000, readyTimeoutMs = 60000, maxClicks = 200, log = () => {}, earlier } = settings;
@@ -384,7 +403,16 @@ export async function collectSection(page, section, settings = {}) {
       clicks++;
       note(`${section.name} View More click ${clicks} at ${previous} cards.`);
       after = { click: clicks, url: currentAt(), cards: beforeClick.cards, timeOrigin: beforeClick.timeOrigin, navigations: 0, loads: 0, contentLoads: 0, retailer: {}, otherHosts: 0 };
-      await page.locator(VIEW_MORE).click({ timeout: timeoutMs });
+      try { await page.locator(VIEW_MORE).click({ timeout: timeoutMs }); }
+      catch (error) {
+        if (!refused && !error?.challenge) {
+          let inspected;
+          try { inspected = await uiState(page); }
+          catch (readError) { if (readError?.challenge) throw readError; }
+          if (inspected) stopIfRefused(inspected);
+        }
+        throw error;
+      }
     }
   } catch (error) {
     // A recorded retailer refusal outranks a later navigation, evaluation or click failure.
