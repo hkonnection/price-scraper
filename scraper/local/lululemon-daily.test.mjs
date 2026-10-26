@@ -7,7 +7,7 @@ import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { parseArgs, runDaily, SECTION_PAUSE_MS, SECTION_PASSES } from './lululemon-daily.mjs';
 import { loadDeals, main as savedMain } from './publish-lululemon.mjs';
-import { SECTIONS } from './lululemon-grid.mjs';
+import { SECTIONS, collectSection } from './lululemon-grid.mjs';
 
 const artifacts = process.env.LULU_TEST_ARTIFACTS || fs.mkdtempSync(path.join(os.homedir(), '.lulu-daily-test-'));
 const at = '2026-10-11T15:02:03.456Z';
@@ -139,6 +139,149 @@ test('a refused first section stops before any pause, second context or publicat
   await assert.rejects(runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime), /HTTP 400/);
   assert.deepEqual(f.visits, ['Women']);
   assert.deepEqual(f.calls.filter(c => c[0] !== 'launch'), [['context', 1], ['context-close', 1], ['close']]);
+  assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
+});
+
+/** Verify safe notices survive failed runs without changing the last complete snapshot. */
+test('retailer challenge saves only bounded section and time, never retries or publishes, and preserves latest', async () => {
+  for (const kind of ['press-and-hold', 'retailer-refusal']) for (const stopped of SECTIONS) {
+    const f = fixture();
+    await runDaily({ outputDir: f.outputDir, publish: false, priorFiles: [] }, f.runtime);
+    const latest = fs.readFileSync(path.join(f.outputDir, 'latest.json'));
+    f.calls.length = 0; f.visits.length = 0; f.logs.length = 0;
+    const capture = f.runtime.capture;
+    f.runtime.capture = async (page, section, settings) => {
+      if (section.name !== stopped.name) return capture(page, section, settings);
+      f.visits.push(section.name);
+      throw Object.assign(new Error('synthetic-private-token cookie=private page text'), { challenge: kind, short: true, grid: 'private partial HTML' });
+    };
+    await assert.rejects(runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime));
+    assert.deepEqual(f.visits, SECTIONS.slice(0, SECTIONS.indexOf(stopped) + 1).map(s => s.name));
+    const dirs = fs.readdirSync(f.outputDir).filter(name => name.startsWith('capture-'));
+    const failed = dirs.map(name => path.join(f.outputDir, name)).find(dir => fs.existsSync(path.join(dir, 'challenge.json')));
+    assert.ok(failed, 'durable challenge notice must exist');
+    const file = path.join(failed, 'challenge.json');
+    assert.deepEqual(JSON.parse(fs.readFileSync(file)), { section: stopped.name, detected_at: at, kind, requires_human: true });
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    const log = fs.readFileSync(path.join(failed, 'run.log'), 'utf8');
+    assert.ok(log.includes(`Human attention required: ${kind} in ${stopped.name} at ${at}. No publication or automated retry.`));
+    assert.doesNotMatch(log + fs.readFileSync(file, 'utf8'), /synthetic-private-token|cookie=|private page text|private partial HTML/);
+    assert.equal(f.calls.some(c => ['release', 'workflow'].includes(c[0])), false);
+    assert.equal(f.calls.filter(c => c[0] === 'context').length, SECTIONS.indexOf(stopped) + 1);
+    assert.equal(f.calls.filter(c => c[0] === 'sleep').length, SECTIONS.indexOf(stopped));
+    assert.equal(fs.existsSync(path.join(failed, 'publish')), false);
+    assert.deepEqual(fs.readFileSync(path.join(f.outputDir, 'latest.json')), latest);
+    assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
+    assert.equal(f.calls.filter(c => c[0] === 'close').length, 1);
+  }
+});
+
+/** Keep the bounded human notice and original refusal even if its JSON file cannot be written. */
+test('failed challenge notice write retains human log and refusal without publishing', async t => {
+  for (const code of ['ENOSPC', 'EACCES']) {
+    const f = fixture();
+    const refusal = Object.assign(new Error('Collection refused by retailer. No publication.'), { challenge: 'press-and-hold' });
+    f.runtime.capture = async (_page, section) => { f.visits.push(section.name); throw refusal; };
+    const original = fs.writeFileSync;
+    const mock = t.mock.method(fs, 'writeFileSync', (file, ...args) => {
+      if (String(file).endsWith('challenge.json')) throw Object.assign(new Error('private filesystem diagnostics'), { code });
+      return original(file, ...args);
+    });
+    let error;
+    try { error = await runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime).catch(caught => caught); }
+    finally { mock.mock.restore(); }
+    assert.equal(error, refusal, code);
+    const dir = fs.readdirSync(f.outputDir).find(name => name.startsWith('capture-'));
+    const log = fs.readFileSync(path.join(f.outputDir, dir, 'run.log'), 'utf8');
+    assert.match(log, /Human attention required: press-and-hold in Women at/);
+    assert.ok(f.logs.some(line => line.includes('Human attention required')));
+    assert.doesNotMatch(log + f.logs.join('\n'), /private filesystem/);
+    assert.deepEqual(f.visits, ['Women']);
+    assert.equal(f.calls.some(c => ['release', 'workflow', 'sleep'].includes(c[0])), false);
+    assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
+    assert.equal(fs.existsSync(path.join(f.outputDir, 'latest.json')), false);
+  }
+});
+
+/** Avoid replacing the refusal with a secondary diagnostic failure after the human line was persisted. */
+test('notice write failure needs no follow-up logger to preserve the refusal', async t => {
+  const f = fixture();
+  const refusal = Object.assign(new Error('Collection refused by retailer. No publication.'), { challenge: 'press-and-hold' });
+  f.runtime.capture = async () => { throw refusal; };
+  const write = fs.writeFileSync, log = fs.writeSync;
+  t.mock.method(fs, 'writeFileSync', (file, ...args) => {
+    if (String(file).endsWith('challenge.json')) throw Object.assign(Error('private disk failure'), { code: 'ENOSPC' });
+    return write(file, ...args);
+  });
+  t.mock.method(fs, 'writeSync', (fd, data, ...args) => {
+    if (String(data).startsWith('Challenge notice could not be saved.')) throw Object.assign(Error('private secondary logger failure'), { code: 'EIO' });
+    return log(fd, data, ...args);
+  });
+  const error = await runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime).catch(caught => caught);
+  assert.equal(error, refusal);
+  assert.ok(f.logs.some(line => line.startsWith('Human attention required:')));
+  assert.equal(f.calls.some(c => ['release', 'workflow'].includes(c[0])), false);
+  assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
+});
+
+/** Keep notice channels independent and retain the original refusal when some or all logging writes fail. */
+test('human notice logging failure preserves refusal and independently writable JSON', async t => {
+  for (const mode of ['human-log', 'emitter', 'all-log', 'both-channels']) await t.test(mode, async sub => {
+    const f = fixture();
+    await runDaily({ outputDir: f.outputDir, publish: false, priorFiles: [] }, f.runtime);
+    const latest = fs.readFileSync(path.join(f.outputDir, 'latest.json'));
+    f.calls.length = 0; f.visits.length = 0;
+    const refusal = Object.assign(Error('Collection refused by retailer. No publication.'), { challenge: 'press-and-hold' });
+    f.runtime.capture = async (_page, section) => { f.visits.push(section.name); throw refusal; };
+    const write = fs.writeSync, save = fs.writeFileSync;
+    let failedLog;
+    sub.mock.method(fs, 'writeSync', (fd, data, ...args) => {
+      if (String(data).startsWith('Human attention required:') && mode !== 'emitter') failedLog = fd;
+      if (fd === failedLog && (String(data).startsWith('Human attention required:') || ['all-log', 'both-channels'].includes(mode))) throw Object.assign(Error('private log EIO'), { code: 'EIO' });
+      return write(fd, data, ...args);
+    });
+    if (mode === 'both-channels') sub.mock.method(fs, 'writeFileSync', (file, ...args) => {
+      if (String(file).endsWith('challenge.json')) throw Object.assign(Error('private notice ENOSPC'), { code: 'ENOSPC' });
+      return save(file, ...args);
+    });
+    if (mode === 'emitter') f.runtime.emit = line => { if (line.startsWith('Human attention required:')) throw Error('private emitter failure'); };
+    const error = await runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime).catch(error => error);
+    assert.equal(error, refusal, mode);
+    const dirs = fs.readdirSync(f.outputDir).filter(name => name.startsWith('capture-'));
+    const notices = dirs.map(dir => path.join(f.outputDir, dir, 'challenge.json')).filter(file => fs.existsSync(file));
+    assert.equal(notices.length, mode === 'both-channels' ? 0 : 1);
+    for (const file of notices) {
+      assert.deepEqual(JSON.parse(fs.readFileSync(file)), { section: 'Women', detected_at: at, kind: 'press-and-hold', requires_human: true });
+      assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    }
+    assert.deepEqual(f.visits, ['Women']);
+    assert.equal(f.calls.some(call => ['release', 'workflow', 'sleep'].includes(call[0])), false);
+    assert.deepEqual(fs.readFileSync(path.join(f.outputDir, 'latest.json')), latest);
+    assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
+  });
+});
+
+/** Reproduce a recorded HTTP refusal followed by a navigation failure through the actual collector and daily notice path. */
+test('daily recorded-response navigation failure saves a bounded challenge notice', async () => {
+  const f = fixture();
+  f.runtime.capture = async (_page, section, settings) => {
+    f.visits.push(section.name);
+    let onResponse;
+    const page = { on: (event, handler) => { if (event === 'response') onResponse = handler; }, off() {},
+      goto: async () => {
+        onResponse({ url: () => 'https://shop.lululemon.com/blocked?secret=private', status: () => 403, request: () => ({ resourceType: () => 'document' }) });
+        throw Error('Execution context destroyed private browser URL');
+      } };
+    return collectSection(page, section, settings);
+  };
+  const error = await runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime).catch(caught => caught);
+  assert.equal(error.challenge, 'retailer-refusal');
+  assert.doesNotMatch(error.message, /private|secret|destroyed/);
+  const dir = fs.readdirSync(f.outputDir).find(name => name.startsWith('capture-'));
+  const notice = JSON.parse(fs.readFileSync(path.join(f.outputDir, dir, 'challenge.json')));
+  assert.deepEqual(notice, { section: 'Women', detected_at: at, kind: 'retailer-refusal', requires_human: true });
+  assert.match(fs.readFileSync(path.join(f.outputDir, dir, 'run.log'), 'utf8'), /Human attention required/);
+  assert.equal(f.calls.some(c => ['release', 'workflow', 'sleep'].includes(c[0])), false);
   assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
 });
 
