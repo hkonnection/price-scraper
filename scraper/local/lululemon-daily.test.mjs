@@ -142,6 +142,40 @@ test('a refused first section stops before any pause, second context or publicat
   assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
 });
 
+/** Verify safe notices survive failed runs without changing the last complete snapshot. */
+test('retailer challenge saves only bounded section and time, never retries or publishes, and preserves latest', async () => {
+  for (const kind of ['press-and-hold', 'retailer-refusal']) for (const stopped of SECTIONS) {
+    const f = fixture();
+    await runDaily({ outputDir: f.outputDir, publish: false, priorFiles: [] }, f.runtime);
+    const latest = fs.readFileSync(path.join(f.outputDir, 'latest.json'));
+    f.calls.length = 0; f.visits.length = 0; f.logs.length = 0;
+    const capture = f.runtime.capture;
+    f.runtime.capture = async (page, section, settings) => {
+      if (section.name !== stopped.name) return capture(page, section, settings);
+      f.visits.push(section.name);
+      throw Object.assign(new Error('synthetic-private-token cookie=private page text'), { challenge: kind, short: true, grid: 'private partial HTML' });
+    };
+    await assert.rejects(runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime));
+    assert.deepEqual(f.visits, SECTIONS.slice(0, SECTIONS.indexOf(stopped) + 1).map(s => s.name));
+    const dirs = fs.readdirSync(f.outputDir).filter(name => name.startsWith('capture-'));
+    const failed = dirs.map(name => path.join(f.outputDir, name)).find(dir => fs.existsSync(path.join(dir, 'challenge.json')));
+    assert.ok(failed, 'durable challenge notice must exist');
+    const file = path.join(failed, 'challenge.json');
+    assert.deepEqual(JSON.parse(fs.readFileSync(file)), { section: stopped.name, detected_at: at, kind, requires_human: true });
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    const log = fs.readFileSync(path.join(failed, 'run.log'), 'utf8');
+    assert.ok(log.includes(`Human attention required: ${kind} in ${stopped.name} at ${at}. No publication or automated retry.`));
+    assert.doesNotMatch(log + fs.readFileSync(file, 'utf8'), /synthetic-private-token|cookie=|private page text|private partial HTML/);
+    assert.equal(f.calls.some(c => ['release', 'workflow'].includes(c[0])), false);
+    assert.equal(f.calls.filter(c => c[0] === 'context').length, SECTIONS.indexOf(stopped) + 1);
+    assert.equal(f.calls.filter(c => c[0] === 'sleep').length, SECTIONS.indexOf(stopped));
+    assert.equal(fs.existsSync(path.join(failed, 'publish')), false);
+    assert.deepEqual(fs.readFileSync(path.join(f.outputDir, 'latest.json')), latest);
+    assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
+    assert.equal(f.calls.filter(c => c[0] === 'close').length, 1);
+  }
+});
+
 /** Make a short-section error as the collector throws it. @param {string} grid Grid of the short pass. @returns {Error} Error. */
 function shortError(grid) { return Object.assign(new Error('Incomplete section: 1 of 2 unique products loaded (2 cards, 1 repeated; last product-data total).'), { short: true, grid }); }
 /** One pass only: with no further pass allowed, a short section stops after its first pass. */

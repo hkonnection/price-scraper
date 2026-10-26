@@ -144,11 +144,15 @@ async function uiState(page) {
 /** Runs inside the page: read UI facts only. A document without a body yet (mid-navigation) reads as not settled.
  * `link.handled` says whether the page script has taken over the View More link: React puts its props on every element it has hydrated.
  * Before that, a click on the server-rendered link is an ordinary navigation to `?page=2` and no product-data request is sent.
- * @returns {object} Raw UI facts.
+ * Press & Hold is a refusal, never an interaction target. Only its bounded kind leaves the reader, not the rendered text.
+ * @returns {object} Raw UI facts with optional challenge kind.
  */
 export function readUiFacts() {
     const refusalText = /access denied|request blocked|verify (?:that )?you are human|unusual traffic|captcha|security challenge|temporarily blocked|pardon our interruption/i;
-    if (!document.body) return { grids: 0, cards: 0, total: null, buttons: 0, visibleButtons: 0, enabled: false, indicators: [], refusal: refusalText.test(document.title || '') };
+    const text = (document.title || '') + ' ' + (document.body?.innerText || '');
+    const challenge = /\bpress\s*(?:&|and)\s*hold\b/i.test(text) ? { challenge: 'press-and-hold' } : {};
+    const refusal = refusalText.test(text) || Boolean(challenge.challenge);
+    if (!document.body) return { grids: 0, cards: 0, total: null, buttons: 0, visibleButtons: 0, enabled: false, indicators: [], refusal, ...challenge };
     /** Test ordinary rendered visibility. @param {Element} el Element. @returns {boolean} Visible. */
     function visible(el) { return Boolean(el.getClientRects().length) && getComputedStyle(el).visibility !== 'hidden'; }
     const grids = [...document.querySelectorAll('[data-testid="product-grid"]')];
@@ -167,7 +171,7 @@ export function readUiFacts() {
       link: shown.length === 1 ? { disabled: Boolean(shown[0].disabled), ariaDisabled: shown[0].getAttribute('aria-disabled'), handled: Object.keys(shown[0]).some(key => key.startsWith('__reactProps$')) } : null,
       timeOrigin: performance.timeOrigin,
       indicators: [...document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [data-testid*="loading"]')].filter(visible).map(el => ({ carousel: Boolean(el.closest('[class*="carousel"]')) })),
-      refusal: refusalText.test(document.title + ' ' + document.body.innerText) };
+      refusal, ...challenge };
 }
 
 /** Derive loading from visible indicators; product image carousel progress bars stay on screen and never mean loading. @param {object} raw Browser-read UI facts. @returns {object} UI state with busy. */
@@ -216,7 +220,7 @@ function pageAt(href) {
  * and the product-data total moves while the list changes, so the latest one counts. Only distinct store product ids count: offset
  * paging over a list that changes while it is read repeats some cards and skips other products. After clicks the section is complete
  * when its unique products (across all passes) are at least that total; products that left the list between passes can make the union
- * larger. A missing or non-integer product-data total, or no product-data response at all, stops the section. Without a click the
+ * larger. A missing, negative or unsafe-integer product-data total, or no product-data response at all, stops the section. Without a click the
  * unique products must equal the embedded total, which describes the same server-rendered page as the tiles.
  * @param {object} products `cards` loaded and `unique` distinct product ids among them (gridProducts). @param {number} clicks View More clicks made. @param {Array<number|null>} dataTotals Totals read from product-data responses in arrival order (null when unreadable).
  * @param {number|null} pageTotal Embedded page total, for comparison. @returns {object} `total` to match and `note`, the totals seen for run.log.
@@ -225,11 +229,11 @@ function pageAt(href) {
 export function expectedTotal({ cards, unique }, clicks, dataTotals, pageTotal) {
   const shown = `page total ${pageTotal ?? 'unknown'}`, counted = `${cards} cards, ${cards - unique} repeated`;
   if (!clicks) {
-    if (!Number.isInteger(pageTotal) || unique !== pageTotal) throw new Error(`Incomplete section: ${unique} of ${pageTotal ?? 'unknown'} unique products loaded (${counted}).`);
+    if (!Number.isSafeInteger(pageTotal) || pageTotal < 0 || unique !== pageTotal) throw new Error(`Incomplete section: ${unique} of ${pageTotal ?? 'unknown'} unique products loaded (${counted}).`);
     return { total: pageTotal, note: `page total, no product-data request; ${shown}` };
   }
   if (!dataTotals.length) throw new Error(`Incomplete section: no product-data response after ${clicks} View More clicks (${cards} cards loaded; ${shown}).`);
-  if (dataTotals.some(total => !Number.isInteger(total))) throw new Error(`Incomplete section: a product-data response gave no product total (${cards} cards loaded; ${shown}).`);
+  if (dataTotals.some(total => !Number.isSafeInteger(total) || total < 0)) throw new Error(`Incomplete section: a product-data response gave no product total (${cards} cards loaded; ${shown}).`);
   const total = dataTotals.at(-1);
   const note = `last product-data total; product-data totals seen ${[...new Set(dataTotals)].join(', ')} in ${dataTotals.length} responses; ${shown}`;
   if (unique < total) throw Object.assign(new Error(`Incomplete section: ${unique} of ${total} unique products loaded (${counted}; ${note}).`), { short: true });
@@ -253,7 +257,7 @@ export function productDataPath(section) { return PRODUCT_DATA_PATH + new URL(se
  * @param {object} section Official section.
  * @param {object} settings Bounded waits (overridable for offline tests only: timeoutMs after a click, readyTimeoutMs before the first), `log`, the run.log writer, and optional `earlier` grid HTML.
  * @returns {Promise<string>} Complete grid HTML.
- * @throws {Error} On refusal, empty/missing grid, stalled loading or expansion.
+ * @throws {Error} On refusal (with a bounded challenge kind), empty/missing grid, stalled loading or expansion.
  */
 export async function collectSection(page, section, settings = {}) {
   const { paceMs = 1200, pollMs = 250, timeoutMs = 30000, readyTimeoutMs = 60000, maxClicks = 200, log = () => {}, earlier } = settings;
@@ -297,9 +301,10 @@ export async function collectSection(page, section, settings = {}) {
     const requests = Object.entries(a.retailer).map(([type, count]) => `${type} ${count}`).join(', ') || 'none';
     note(`${section.name} after click ${a.click}: URL ${a.url} → ${currentAt()}, cards ${a.cards} → ${state?.cards ?? 'unknown'}, document ${document}, main-frame navigations ${a.navigations}, load events ${a.loads}, DOMContentLoaded ${a.contentLoads}, retailer requests ${requests}, other-host requests ${a.otherHosts}.`);
   }
-  /** Stop on a recorded refusal response or refusal page text. @param {object} state UI state. @returns {void} @throws {Error} On refusal. */
+  /** Stop on a refusal and expose only its bounded kind for private operator reporting. @param {object} state UI state. @returns {void} @throws {Error} On refusal, never marked for re-paging. */
   function stopIfRefused(state) {
-    if (refused || state.refusal) throw new Error(`Collection refused by retailer${refused ? ': ' + refused : ''}. No publication.`);
+    if (refused || state.refusal) throw Object.assign(new Error(`Collection refused by retailer${refused ? ': ' + refused : ''}. No publication.`),
+      { challenge: state.challenge === 'press-and-hold' ? 'press-and-hold' : 'retailer-refusal' });
   }
   /** Log the repeat count of the unlogged identical checks, named by the last of them. @returns {void} */
   function flushRepeats() {
@@ -319,7 +324,7 @@ export async function collectSection(page, section, settings = {}) {
   page.on('response', onResponse); page.on('framenavigated', onNavigated); page.on('load', onLoad); page.on('domcontentloaded', onContentLoaded);
   try {
     const response = await page.goto(section.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    if (!response?.ok()) throw new Error(`Collection refused: HTTP ${response?.status() ?? 'unknown'}${await refusalShape(response)}.`);
+    if (!response?.ok()) throw Object.assign(new Error(`Collection refused: HTTP ${response?.status() ?? 'unknown'}${await refusalShape(response)}.`), { challenge: 'retailer-refusal' });
     let previous = 0, expectGrowth = false;
     while (true) {
       let state;

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseGrid, combineSections, collectSection, classifyUiState, readUiFacts, productDataPath, gridProducts, SECTIONS } from './lululemon-grid.mjs';
+import { parseGrid, combineSections, collectSection, classifyUiState, readUiFacts, productDataPath, gridProducts, expectedTotal, SECTIONS } from './lululemon-grid.mjs';
 
 const at = '2026-10-11T15:02:03.456Z';
 /** Make one inert synthetic product tile. @param {string} code Product code. @param {string} name Name. @param {string} prices Price markup. @returns {string} HTML. */
@@ -106,6 +106,50 @@ test('collector stops before another click when refusal arrives during ordinary 
   page.waitForTimeout = async () => { page.evaluate = async () => ({ ...initial, refusal: true }); };
   await assert.rejects(collectSection(page, SECTIONS[0], { paceMs: 1, pollMs: 1, timeoutMs: 3 }), /refus/i);
   assert.deepEqual(page.trace, [SECTIONS[0].url]);
+});
+
+/** Read synthetic rendered text through the real browser-side reader. @param {string} text Body text. @param {string} title Title. @param {boolean} body Whether a body exists. @returns {object} UI facts. */
+function renderedFacts(text, title = '', body = true) {
+  const saved = { document: globalThis.document, getComputedStyle: globalThis.getComputedStyle };
+  const link = { getClientRects: () => [1], getAttribute: () => null, __reactProps$test: {} };
+  try {
+    globalThis.getComputedStyle = () => ({ visibility: 'visible' });
+    globalThis.document = { title, body: body ? { innerText: text } : null,
+      getElementById: () => ({ textContent: JSON.stringify({ props: { pageProps: { dehydratedState: { queries: [{ queryKey: ['catalogPageData'], state: { data: { pages: [{ data: { attributes: { totalCount: 2 } } }] } } }] } } } }) }),
+      querySelectorAll: selector => selector.includes('product-grid') ? [{ querySelectorAll: () => [1] }] : selector.includes('view_more') ? [link] : [] };
+    return readUiFacts();
+  } finally { Object.assign(globalThis, saved); }
+}
+
+/** Verify actual rendered challenge detection stops collection before any interaction. */
+test('Press & Hold rendered body, title and missing-body title stop without clicking or retry metadata', async () => {
+  for (const text of ['Press & Hold', 'PRESS AND HOLD', 'Press\n&\u00a0Hold', 'press&hold']) {
+    for (const facts of [renderedFacts(text), renderedFacts('', text), renderedFacts('', text, false)]) {
+      assert.equal(facts.refusal, true, text);
+      assert.equal(facts.challenge, 'press-and-hold');
+      const page = fakePage([facts]);
+      const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2, readyTimeoutMs: 2 }).catch(caught => caught);
+      assert.match(error.message, /refused/i);
+      assert.equal(error.challenge, 'press-and-hold');
+      assert.equal(error.short, undefined);
+      assert.deepEqual(page.trace, [SECTIONS[0].url]);
+    }
+  }
+  assert.equal(renderedFacts('Shop sale shirts and bags').refusal, false);
+});
+
+/** Verify challenge detection at every interaction boundary. */
+test('Press & Hold during pacing, after expansion and final settling prevents the next interaction', async () => {
+  const challenge = { ...initial, ...renderedFacts('Press & Hold'), cards: 2, buttons: 0, visibleButtons: 0 };
+  for (const boundary of ['pacing', 'after-click', 'final']) {
+    const page = fakePage([initial]); let reads = 0;
+    const states = boundary === 'pacing' ? [initial, challenge] : boundary === 'after-click' ? [initial, initial, challenge] : [complete, challenge];
+    page.evaluate = async () => states[Math.min(reads++, states.length - 1)];
+    const error = await collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(caught => caught);
+    assert.equal(error.challenge, 'press-and-hold', boundary);
+    assert.equal(error.short, undefined);
+    assert.equal(page.trace.filter(item => item === 'click').length, boundary === 'after-click' ? 1 : 0);
+  }
 });
 
 const initial = { grids: 1, cards: 1, total: 2, buttons: 1, visibleButtons: 1, enabled: true, link: { disabled: false, ariaDisabled: null, handled: true }, indicators: [], refusal: false };
@@ -462,6 +506,25 @@ test('product-data totals come only from the section own successful product-data
   const before = productData(SECTIONS[0].url, 9, 0);
   const page = clickingPage([shown, done, done], [other, graphql, productData(SECTIONS[0].url, 2)], [before]);
   assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), /product-grid/);
+});
+
+/** Reject impossible retailer totals instead of accepting any nonnegative captured count as complete. */
+test('negative and unsafe retailer totals cannot certify a complete section', () => {
+  for (const total of [-1, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => expectedTotal({ cards: 2, unique: 2 }, 1, [total], 2), /no product total/i);
+    assert.throws(() => expectedTotal({ cards: 2, unique: 2 }, 2, [total, 2], 2), /no product total/i);
+    assert.throws(() => expectedTotal({ cards: total, unique: total }, 0, [], total), /Incomplete section/i);
+  }
+});
+
+/** Preserve bounded metadata for operator notices on every existing refusal path. */
+test('HTTP and generic rendered refusals expose only the bounded retailer-refusal kind', async () => {
+  for (const page of [fakePage([initial], 403), fakePage([{ ...initial, refusal: true }]), clickingPage([initial], [response(MEN_DATA, 429)])]) {
+    const error = await collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(caught => caught);
+    assert.equal(error.challenge, 'retailer-refusal');
+    assert.equal(error.short, undefined);
+    assert.match(error.message, /refus/i);
+  }
 });
 
 test('the grid product count is distinct store product ids among tiles, the id parseGrid keeps', () => {

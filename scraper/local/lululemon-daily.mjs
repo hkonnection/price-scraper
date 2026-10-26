@@ -81,7 +81,8 @@ function github(args) {
 }
 
 /** Capture a complete set under an exclusive local lock, each section in its own fresh browser context with SECTION_PAUSE_MS between sections
- * (a section the collector reports short is loaded again, after the same pause, up to SECTION_PASSES loads, and its passes are combined by product id), validate with the saved publisher, then upload/dispatch exactly once. @param {object} options Validated options. @param {object} overrides Offline dependency injection (including sleep), not CLI flags. @returns {Promise<object>} Saved set and dispatch details. @throws {Error} On any incomplete capture, unsafe state or uncertain remote operation; never retries. */
+ * (a section the collector reports short is loaded again, after the same pause, up to SECTION_PASSES loads, and its passes are combined by product id), validate with the saved publisher, then upload/dispatch exactly once.
+ * A retailer refusal writes private challenge.json for human notification and stops without re-paging or publishing. @param {object} options Validated options. @param {object} overrides Offline dependency injection (including sleep), not CLI flags. @returns {Promise<object>} Saved set and dispatch details. @throws {Error} On any incomplete capture, unsafe state or uncertain remote operation; never retries. */
 export async function runDaily(options, overrides = {}) {
   const r = { now: () => new Date(), platform: process.platform, uid: process.getuid?.(), capture: collectSection,
     launch: async settings => (await import('playwright')).chromium.launch(settings), github, emit: console.log,
@@ -123,6 +124,13 @@ export async function runDaily(options, overrides = {}) {
           emit(`${section.name} page load at ${new Date().toISOString()} in a fresh browser context.`);
           html = await r.capture(page, section, { log: emit, ...(earlier ? { earlier, pass } : {}) });
         } catch (error) {
+          if (error?.challenge) {
+            const notice = { section: section.name, detected_at: r.now().toISOString(),
+              kind: error.challenge === 'press-and-hold' ? 'press-and-hold' : 'retailer-refusal', requires_human: true };
+            save(path.join(directory, 'challenge.json'), notice);
+            emit(`Human attention required: ${notice.kind} in ${notice.section} at ${notice.detected_at}. No publication or automated retry.`);
+            throw error;
+          }
           if (pass >= r.sectionPasses || !error?.short || typeof error.grid !== 'string') throw error;
           earlier = error.grid;
           emit(`${section.name} pass ${pass} short: ${error.message} Re-paging ${section.name} in a fresh browser context after ${SECTION_PAUSE_MS / 1000} s (pass ${pass + 1} of ${r.sectionPasses}); all passes are combined by product id.`);
