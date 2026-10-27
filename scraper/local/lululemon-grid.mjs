@@ -165,20 +165,36 @@ async function uiState(page) {
    * @param {string} frameHost Sanitized host. @returns {Error} Bounded inspection failure.
    */
   function unreadable(frameHost) { return Object.assign(new Error('Collection stopped: passive refusal inspection unavailable. Human attention required. No publication.'), { challenge: 'inspection-unavailable', frameHost }); }
-  /** Give one document its own budget; race handlers consume late rejections and the timer is always cleared.
+  /** Give one document its own budget, including transient loading polls. Consume late results without further reads.
+   * Successful identity comes from the inspected document; failures sample current safe identity without another evaluation.
    * @param {import('playwright').Page|import('playwright').Frame} target Document. @param {boolean} refusalOnly Child-frame mode.
-   * @returns {Promise<object>} UI facts and sanitized identity. @throws {Error} On a deadline or failed evaluation.
+   * @returns {Promise<object>} UI facts and sanitized identity. @throws {Error} On a deadline or missing/failed inspection.
    */
   async function read(target, refusalOnly) {
-    const frameHost = documentHost(target);
-    let timer;
-    try {
-      const facts = await Promise.race([target.evaluate(readUiFacts, { refusalOnly }),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(unreadable(frameHost)), UI_READ_MS); })]);
-      if (facts.unavailable && !facts.refusal) throw unreadable(frameHost);
-      return { ...facts, frameHost };
-    } catch { throw unreadable(frameHost); }
-    finally { clearTimeout(timer); }
+    return new Promise((resolve, reject) => {
+      let done = false, poll;
+      const timer = setTimeout(() => finish(null), UI_READ_MS);
+      /** Settle once and release both timers, never retaining browser diagnostics.
+       * @param {object|null} facts Readable facts, or null on inspection failure. @returns {void}
+       */
+      function finish(facts) {
+        if (done) return;
+        done = true; clearTimeout(timer); clearTimeout(poll);
+        if (!facts) reject(unreadable(documentHost(target)));
+        else resolve({ ...facts, frameHost: sanitizeStopHost(facts.frameHost ?? documentHost(target)) });
+      }
+      /** Read only while this document's original budget remains active. @returns {void} */
+      function inspect() {
+        if (done) return;
+        Promise.resolve().then(() => target.evaluate(readUiFacts, { refusalOnly })).then(facts => {
+          if (done) return;
+          if (!facts || typeof facts.refusal !== 'boolean' || (facts.unavailable && !facts.refusal)) finish(null);
+          else if (facts.loading && !facts.refusal) poll = setTimeout(inspect, 25);
+          else finish(facts);
+        }, () => finish(null));
+      }
+      inspect();
+    });
   }
   let raw = await read(page, false);
   if (raw.refusal) return classifyUiState(raw);
@@ -203,20 +219,24 @@ async function uiState(page) {
   return classifyUiState(raw);
 }
 
-/** Runs inside the page: read UI facts only. A document without a body yet (mid-navigation) reads as not settled.
+/** Runs inside the page: read UI facts and hostname from the same document. Child loading remains unsettled within its read budget.
+ * A bodyless child uses document-element rendered text when available, otherwise DOM text for SVG/XML; empty surfaces remain readable.
  * `link.handled` says whether the page script has taken over the View More link: React puts its props on every element it has hydrated.
  * Before that, a click on the server-rendered link is an ordinary navigation to `?page=2` and no product-data request is sent.
  * Press & Hold is a refusal, never an interaction target. Only its bounded kind leaves the reader, not the rendered text.
  * @param {object} [options={}] Reader mode. @param {boolean} [options.refusalOnly=false] Read only title and rendered refusal text for a child frame.
- * @returns {object} Raw UI facts with optional challenge kind, or bounded refusal facts with unavailable set for a child document without a body.
+ * @returns {object} UI facts with document host and optional challenge kind; child facts mark loading or a missing passive text surface.
  */
 export function readUiFacts({ refusalOnly = false } = {}) {
     const refusalText = /access denied|access to this page has been denied|request blocked|verify (?:that )?you are (?:a )?human|are you a robot\?|unusual traffic|captcha|security challenge|temporarily blocked|pardon our interruption/i;
-    const text = (document.title || '') + ' ' + (document.body?.innerText || '');
+    const frameHost = ['http:', 'https:'].includes(globalThis.location?.protocol) ? globalThis.location.hostname : 'unknown';
+    const surface = document.body ? document.body.innerText : document.documentElement?.innerText ?? document.documentElement?.textContent;
+    const text = (document.title || '') + ' ' + (typeof surface === 'string' ? surface : '');
     const challenge = /\bpress[\s\u200b-]*(?:&|\uFF06|and)[\s\u200b-]*hold\b/i.test(text) ? { challenge: 'press-and-hold' } : {};
     const refusal = refusalText.test(text) || Boolean(challenge.challenge);
-    if (refusalOnly) return { refusal, ...challenge, ...(!document.body ? { unavailable: true } : {}) };
-    if (!document.body) return { grids: 0, cards: 0, total: null, buttons: 0, visibleButtons: 0, enabled: false, indicators: [], refusal, ...challenge };
+    if (refusalOnly) return { refusal, ...challenge, frameHost,
+      ...(!refusal && document.readyState === 'loading' ? { loading: true } : !refusal && typeof surface !== 'string' ? { unavailable: true } : {}) };
+    if (!document.body) return { grids: 0, cards: 0, total: null, buttons: 0, visibleButtons: 0, enabled: false, indicators: [], refusal, ...challenge, frameHost };
     /** Test ordinary rendered visibility. @param {Element} el Element. @returns {boolean} Visible. */
     function visible(el) { return Boolean(el.getClientRects().length) && getComputedStyle(el).visibility !== 'hidden'; }
     const grids = [...document.querySelectorAll('[data-testid="product-grid"]')];
@@ -235,7 +255,7 @@ export function readUiFacts({ refusalOnly = false } = {}) {
       link: shown.length === 1 ? { disabled: Boolean(shown[0].disabled), ariaDisabled: shown[0].getAttribute('aria-disabled'), handled: Object.keys(shown[0]).some(key => key.startsWith('__reactProps$')) } : null,
       timeOrigin: performance.timeOrigin,
       indicators: [...document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [data-testid*="loading"]')].filter(visible).map(el => ({ carousel: Boolean(el.closest('[class*="carousel"]')) })),
-      refusal, ...challenge };
+      refusal, ...challenge, frameHost };
 }
 
 /** Derive loading from visible indicators; product image carousel progress bars stay on screen and never mean loading. @param {object} raw Browser-read UI facts. @returns {object} UI state with busy. */
