@@ -308,7 +308,7 @@ test('readable bodyless surfaces are inspected while missing surfaces fail close
   for (const [name, document, kind] of [
     ['empty-svg', { title: '', body: null, documentElement: { textContent: '' }, readyState: 'complete' }, null],
     ['empty-html', { title: '', body: null, documentElement: { textContent: '' }, readyState: 'interactive' }, null],
-    ['empty-rendered-html', { title: '', body: null, documentElement: { innerText: '', textContent: 'security challenge in a head script' }, readyState: 'complete' }, null],
+    ['empty-rendered-html', { title: '', body: null, documentElement: { namespaceURI: 'http://www.w3.org/1999/xhtml', innerText: '', textContent: 'security challenge in a head script' }, readyState: 'complete' }, null],
     ['svg-challenge', { title: '', body: null, documentElement: { textContent: 'Press and Hold' }, readyState: 'complete' }, 'press-and-hold'],
     ['loading-challenge', { title: '', body: null, documentElement: { textContent: 'Press and Hold' }, readyState: 'loading' }, 'press-and-hold'],
     ['missing-root', { title: '', body: null, documentElement: null, readyState: 'complete' }, 'inspection-unavailable'],
@@ -321,6 +321,31 @@ test('readable bodyless surfaces are inspected while missing surfaces fail close
     else assert.match(result, /product-grid/);
     assert.deepEqual(page.trace, [SECTIONS[0].url]);
   });
+});
+
+/** Exclude HTML head text regardless of root innerText, while retaining title and non-HTML challenge detection. */
+test('bodyless HTML checks title only and SVG XML keep DOM text inspection', () => {
+  const html = { namespaceURI: 'http://www.w3.org/1999/xhtml', innerText: 'captcha widget settings', textContent: 'captcha widget settings' };
+  const empty = frameDocumentFacts({ title: '', body: null, documentElement: html, readyState: 'loading' });
+  assert.equal(empty.refusal, false);
+  assert.equal(empty.loading, true);
+  for (const [title, root] of [['Press and Hold', html], ['', { namespaceURI: 'http://www.w3.org/2000/svg', textContent: 'Press and Hold' }],
+    ['', { namespaceURI: 'urn:fixture', textContent: 'Press and Hold' }]]) {
+    const facts = frameDocumentFacts({ title, body: null, documentElement: root, readyState: 'loading' });
+    assert.equal(facts.challenge, 'press-and-hold');
+    assert.equal(facts.frameHost, 'inspected.example');
+    assert.equal(facts.loading, undefined);
+  }
+});
+
+/** A readable body is inspected now, even if its parser never closes. */
+test('readable body remains inspectable in loading state', () => {
+  for (const text of ['', 'Friendly synthetic ad', 'Press and Hold']) {
+    const facts = frameDocumentFacts({ title: '', body: { innerText: text }, readyState: 'loading' });
+    assert.equal(facts.loading, undefined);
+    assert.equal(facts.unavailable, undefined);
+    assert.equal(facts.refusal, text === 'Press and Hold');
+  }
 });
 
 /** Let transient frame loading settle only inside its original two-second document bound. */
@@ -399,6 +424,60 @@ test('headed offline framed Press and Hold fixture stops without input', { skip:
     assert.equal(inputs, 0); assert.equal(listingClicks, 0); assert.equal(unexpectedRoutes, 0);
   } finally { await browser.close(); }
 });
+
+/** Prove readable ad frames complete with production pacing and without a pre-inspection load wait. */
+for (const mode of ['hidden-head-script', 'body-parser-block', 'open-document']) {
+  test(`headed offline readable frame ${mode} completes without false refusal`, { skip: process.env.LULU_HEADED_FIXTURES !== '1' }, async () => {
+    const { chromium } = await import('playwright');
+    const browser = await chromium.launch({ channel: 'chrome', headless: false,
+      args: ['--proxy-server=127.0.0.1:9', '--proxy-bypass-list=<-loopback>', '--disable-background-networking', '--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1'] });
+    let inputs = 0, listingClicks = 0, unexpectedRoutes = 0, script = Promise.resolve();
+    const surfaces = [];
+    try {
+      const context = await browser.newContext({ serviceWorkers: 'block' });
+      await context.exposeBinding('fixtureSurface', (_, facts) => { surfaces.push(facts); });
+      await context.exposeBinding('fixtureInput', () => { inputs++; });
+      await context.exposeBinding('fixtureListingClick', () => { listingClicks++; });
+      await context.addInitScript(() => {
+        for (const event of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'touchstart', 'keydown']) {
+          addEventListener(event, () => { if (location.hostname !== 'shop.lululemon.com') globalThis.fixtureInput(); }, true);
+        }
+      });
+      await context.route('**/*', async route => {
+        const url = new URL(route.request().url());
+        if (url.hostname === 'readable.example' && url.pathname === '/block.js') {
+          script = new Promise(resolve => setTimeout(resolve, mode === 'hidden-head-script' ? 500 : 3500))
+            .then(() => route.fulfill({ contentType: 'application/javascript', body: '/* synthetic parser release */' }));
+          return script;
+        }
+        if (url.hostname === 'readable.example') {
+          const report = '<script>fixtureSurface({hasBody:!!document.body,readyState:document.readyState});</script>';
+          const body = mode === 'hidden-head-script'
+            ? '<html><head><script>var vendorConfig="captcha widget settings";</script>' + report + '<script src="https://readable.example/block.js"></script></head><body>Friendly synthetic ad</body></html>'
+            : '<html><body>Friendly synthetic ad' + report + '<script src="https://readable.example/block.js"></script></body></html>';
+          return route.fulfill({ contentType: 'text/html', body });
+        }
+        if (url.hostname === 'shop.lululemon.com') {
+          const catalog = { props: { pageProps: { dehydratedState: { queries: [{ queryKey: ['catalogPageData'], state: { data: { pages: [{ data: { attributes: { totalCount: 1 } } }] } } }] } } } };
+          const child = mode === 'open-document'
+            ? '<iframe id="ad"></iframe><script>const ad=document.getElementById("ad").contentDocument;ad.open();ad.write("<html><body>Friendly synthetic ad</body>");fixtureSurface({hasBody:!!ad.body,readyState:ad.readyState});</script>'
+            : `<iframe ${mode === 'hidden-head-script' ? 'style="display:none"' : ''} src="https://readable.example/frame?token=synthetic#fragment"></iframe>`;
+          return route.fulfill({ contentType: 'text/html', body: '<html><body><script id="__NEXT_DATA__" type="application/json">' + JSON.stringify(catalog) + '</script>' +
+            grid(tile('fixture').replace(/<img[^>]*>/, '')) + child + '</body></html>' });
+        }
+        unexpectedRoutes++; await route.abort();
+      });
+      const page = await context.newPage();
+      const html = await collectSection(page, SECTIONS[0]);
+      assert.match(html, /product-grid/);
+      assert.ok(surfaces.some(facts => facts.hasBody === (mode !== 'hidden-head-script') && facts.readyState === 'loading'), JSON.stringify(surfaces));
+      assert.equal(inputs, 0); assert.equal(listingClicks, 0); assert.equal(unexpectedRoutes, 0);
+    } finally {
+      await script.catch(() => {}); // Await fixture-response cleanup after collection, never add a pre-inspection load wait.
+      await browser.close();
+    }
+  });
+}
 
 /** Treat a loading child document or failed frame inventory as unavailable, never as proof of safety. */
 test('loading frame and frame churn fail closed with bounded metadata', async t => {

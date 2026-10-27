@@ -219,8 +219,8 @@ async function uiState(page) {
   return classifyUiState(raw);
 }
 
-/** Runs inside the page: read UI facts and hostname from the same document. Child loading remains unsettled within its read budget.
- * A bodyless child uses document-element rendered text when available, otherwise DOM text for SVG/XML; empty surfaces remain readable.
+/** Runs inside the page: read UI facts and hostname from the same document. Only bodyless child loading waits within its read budget.
+ * Bodyless HTML roots use title only, never head-script text. SVG/XML retain DOM text inspection; readable bodies do not wait for parser completion.
  * `link.handled` says whether the page script has taken over the View More link: React puts its props on every element it has hydrated.
  * Before that, a click on the server-rendered link is an ordinary navigation to `?page=2` and no product-data request is sent.
  * Press & Hold is a refusal, never an interaction target. Only its bounded kind leaves the reader, not the rendered text.
@@ -230,12 +230,12 @@ async function uiState(page) {
 export function readUiFacts({ refusalOnly = false } = {}) {
     const refusalText = /access denied|access to this page has been denied|request blocked|verify (?:that )?you are (?:a )?human|are you a robot\?|unusual traffic|captcha|security challenge|temporarily blocked|pardon our interruption/i;
     const frameHost = ['http:', 'https:'].includes(globalThis.location?.protocol) ? globalThis.location.hostname : 'unknown';
-    const surface = document.body ? document.body.innerText : document.documentElement?.innerText ?? document.documentElement?.textContent;
+    const surface = document.body ? document.body.innerText : document.documentElement?.namespaceURI === 'http://www.w3.org/1999/xhtml' ? '' : document.documentElement?.textContent;
     const text = (document.title || '') + ' ' + (typeof surface === 'string' ? surface : '');
     const challenge = /\bpress[\s\u200b-]*(?:&|\uFF06|and)[\s\u200b-]*hold\b/i.test(text) ? { challenge: 'press-and-hold' } : {};
     const refusal = refusalText.test(text) || Boolean(challenge.challenge);
     if (refusalOnly) return { refusal, ...challenge, frameHost,
-      ...(!refusal && document.readyState === 'loading' ? { loading: true } : !refusal && typeof surface !== 'string' ? { unavailable: true } : {}) };
+      ...(!refusal && !document.body && document.readyState === 'loading' ? { loading: true } : !refusal && typeof surface !== 'string' ? { unavailable: true } : {}) };
     if (!document.body) return { grids: 0, cards: 0, total: null, buttons: 0, visibleButtons: 0, enabled: false, indicators: [], refusal, ...challenge, frameHost };
     /** Test ordinary rendered visibility. @param {Element} el Element. @returns {boolean} Visible. */
     function visible(el) { return Boolean(el.getClientRects().length) && getComputedStyle(el).visibility !== 'hidden'; }
