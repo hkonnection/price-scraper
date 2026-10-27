@@ -144,7 +144,7 @@ test('a refused first section stops before any pause, second context or publicat
 
 /** Verify safe notices survive failed runs without changing the last complete snapshot. */
 test('retailer challenge saves only bounded section and time, never retries or publishes, and preserves latest', async () => {
-  for (const kind of ['press-and-hold', 'retailer-refusal']) for (const stopped of SECTIONS) {
+  for (const kind of ['press-and-hold', 'retailer-refusal', 'inspection-unavailable']) for (const stopped of SECTIONS) {
     const f = fixture();
     await runDaily({ outputDir: f.outputDir, publish: false, priorFiles: [] }, f.runtime);
     const latest = fs.readFileSync(path.join(f.outputDir, 'latest.json'));
@@ -161,10 +161,10 @@ test('retailer challenge saves only bounded section and time, never retries or p
     const failed = dirs.map(name => path.join(f.outputDir, name)).find(dir => fs.existsSync(path.join(dir, 'challenge.json')));
     assert.ok(failed, 'durable challenge notice must exist');
     const file = path.join(failed, 'challenge.json');
-    assert.deepEqual(JSON.parse(fs.readFileSync(file)), { section: stopped.name, detected_at: at, kind, requires_human: true });
+    assert.deepEqual(JSON.parse(fs.readFileSync(file)), { section: stopped.name, detected_at: at, kind, frame_host: 'unknown', requires_human: true });
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     const log = fs.readFileSync(path.join(failed, 'run.log'), 'utf8');
-    assert.ok(log.includes(`Human attention required: ${kind} in ${stopped.name} at ${at}. No publication or automated retry.`));
+    assert.ok(log.includes(`Human attention required: ${kind} in ${stopped.name} at ${at}; frame host unknown. No publication or automated retry.`));
     assert.doesNotMatch(log + fs.readFileSync(file, 'utf8'), /synthetic-private-token|cookie=|private page text|private partial HTML/);
     assert.equal(f.calls.some(c => ['release', 'workflow'].includes(c[0])), false);
     assert.equal(f.calls.filter(c => c[0] === 'context').length, SECTIONS.indexOf(stopped) + 1);
@@ -173,6 +173,28 @@ test('retailer challenge saves only bounded section and time, never retries or p
     assert.deepEqual(fs.readFileSync(path.join(f.outputDir, 'latest.json')), latest);
     assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
     assert.equal(f.calls.filter(c => c[0] === 'close').length, 1);
+  }
+});
+
+/** Propagate only a bounded host and distinguish unavailable inspection in both notice channels. */
+test('inspection notices sanitize host metadata and preserve the unavailable kind', async () => {
+  for (const [frameHost, expected] of [['slow.example', 'slow.example'], ['SLOW.EXAMPLE.', 'slow.example'],
+    ['user:secret@slow.example/path?token=secret#private', 'unknown'], ['https://slow.example/private', 'unknown'],
+    ['bad\nhost', 'unknown'], ['', 'unknown'], [undefined, 'unknown']]) {
+    const f = fixture();
+    const failure = Object.assign(Error('private rendered text'), { challenge: 'inspection-unavailable', frameHost, short: true, grid: 'private partial HTML' });
+    f.runtime.capture = async () => { throw failure; };
+    const error = await runDaily({ outputDir: f.outputDir, publish: true, priorFiles: [] }, f.runtime).catch(error => error);
+    assert.equal(error, failure);
+    const dir = fs.readdirSync(f.outputDir).find(name => name.startsWith('capture-'));
+    const notice = JSON.parse(fs.readFileSync(path.join(f.outputDir, dir, 'challenge.json')));
+    assert.deepEqual(notice, { section: 'Women', detected_at: at, kind: 'inspection-unavailable', frame_host: expected, requires_human: true });
+    const log = fs.readFileSync(path.join(f.outputDir, dir, 'run.log'), 'utf8');
+    assert.ok(log.includes(`frame host ${expected}`));
+    assert.doesNotMatch(log + JSON.stringify(notice), /secret|private|token|https?:|partial HTML/);
+    assert.equal(f.calls.some(call => ['release', 'workflow', 'sleep'].includes(call[0])), false);
+    assert.equal(fs.existsSync(path.join(f.outputDir, 'latest.json')), false);
+    assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);
   }
 });
 
@@ -231,7 +253,7 @@ test('human notice logging failure preserves refusal and independently writable 
     await runDaily({ outputDir: f.outputDir, publish: false, priorFiles: [] }, f.runtime);
     const latest = fs.readFileSync(path.join(f.outputDir, 'latest.json'));
     f.calls.length = 0; f.visits.length = 0;
-    const refusal = Object.assign(Error('Collection refused by retailer. No publication.'), { challenge: 'press-and-hold' });
+    const refusal = Object.assign(Error('Collection refused by retailer. No publication.'), { challenge: 'press-and-hold', frameHost: 'challenge.example' });
     f.runtime.capture = async (_page, section) => { f.visits.push(section.name); throw refusal; };
     const write = fs.writeSync, save = fs.writeFileSync;
     let failedLog;
@@ -251,7 +273,7 @@ test('human notice logging failure preserves refusal and independently writable 
     const notices = dirs.map(dir => path.join(f.outputDir, dir, 'challenge.json')).filter(file => fs.existsSync(file));
     assert.equal(notices.length, mode === 'both-channels' ? 0 : 1);
     for (const file of notices) {
-      assert.deepEqual(JSON.parse(fs.readFileSync(file)), { section: 'Women', detected_at: at, kind: 'press-and-hold', requires_human: true });
+      assert.deepEqual(JSON.parse(fs.readFileSync(file)), { section: 'Women', detected_at: at, kind: 'press-and-hold', frame_host: 'challenge.example', requires_human: true });
       assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     }
     assert.deepEqual(f.visits, ['Women']);
@@ -279,7 +301,7 @@ test('daily recorded-response navigation failure saves a bounded challenge notic
   assert.doesNotMatch(error.message, /private|secret|destroyed/);
   const dir = fs.readdirSync(f.outputDir).find(name => name.startsWith('capture-'));
   const notice = JSON.parse(fs.readFileSync(path.join(f.outputDir, dir, 'challenge.json')));
-  assert.deepEqual(notice, { section: 'Women', detected_at: at, kind: 'retailer-refusal', requires_human: true });
+  assert.deepEqual(notice, { section: 'Women', detected_at: at, kind: 'retailer-refusal', frame_host: 'shop.lululemon.com', requires_human: true });
   assert.match(fs.readFileSync(path.join(f.outputDir, dir, 'run.log'), 'utf8'), /Human attention required/);
   assert.equal(f.calls.some(c => ['release', 'workflow', 'sleep'].includes(c[0])), false);
   assert.equal(fs.existsSync(path.join(f.outputDir, 'run.lock')), false);

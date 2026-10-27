@@ -9,7 +9,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SECTIONS, collectSection, parseGrid, combineSections } from './lululemon-grid.mjs';
+import { SECTIONS, collectSection, parseGrid, combineSections, sanitizeStopHost } from './lululemon-grid.mjs';
 import { loadDeals } from './publish-lululemon.mjs';
 
 const SCRIPT = fileURLToPath(import.meta.url);
@@ -82,7 +82,7 @@ function github(args) {
 
 /** Capture a complete set under an exclusive local lock, each section in its own fresh browser context with SECTION_PAUSE_MS between sections
  * (a section the collector reports short is loaded again, after the same pause, up to SECTION_PASSES loads, and its passes are combined by product id), validate with the saved publisher, then upload/dispatch exactly once.
- * A retailer refusal logs human attention, saves private challenge.json when possible, and stops without re-paging or publishing. Logging and notice-write failures are guarded independently and preserve the original refusal. @param {object} options Validated options. @param {object} overrides Offline dependency injection (including sleep), not CLI flags. @returns {Promise<object>} Saved set and dispatch details. @throws {Error} On any incomplete capture, unsafe state or uncertain remote operation; never retries. */
+ * A retailer refusal or unavailable inspection logs human attention with a sanitized host, saves private challenge.json when possible, and stops without re-paging or publishing. Logging and notice-write failures are guarded independently and preserve the original refusal. @param {object} options Validated options. @param {object} overrides Offline dependency injection (including sleep), not CLI flags. @returns {Promise<object>} Saved set and dispatch details. @throws {Error} On any incomplete capture, unsafe state or uncertain remote operation; never retries. */
 export async function runDaily(options, overrides = {}) {
   const r = { now: () => new Date(), platform: process.platform, uid: process.getuid?.(), capture: collectSection,
     launch: async settings => (await import('playwright')).chromium.launch(settings), github, emit: console.log,
@@ -126,8 +126,9 @@ export async function runDaily(options, overrides = {}) {
         } catch (error) {
           if (error?.challenge) {
             const notice = { section: section.name, detected_at: r.now().toISOString(),
-              kind: error.challenge === 'press-and-hold' ? 'press-and-hold' : 'retailer-refusal', requires_human: true };
-            try { emit(`Human attention required: ${notice.kind} in ${notice.section} at ${notice.detected_at}. No publication or automated retry.`); }
+              kind: ['press-and-hold', 'inspection-unavailable'].includes(error.challenge) ? error.challenge : 'retailer-refusal',
+              frame_host: sanitizeStopHost(error.frameHost), requires_human: true };
+            try { emit(`Human attention required: ${notice.kind} in ${notice.section} at ${notice.detected_at}; frame host ${notice.frame_host}. No publication or automated retry.`); }
             catch { /* A log failure must not suppress the independent JSON notice or replace the refusal. */ }
             try { save(path.join(directory, 'challenge.json'), notice); }
             catch { /* Either notice channel may fail without replacing the original refusal. */ }

@@ -187,7 +187,8 @@ test('passive inspection deadline stops pending frames without a retry', async t
       collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error),
       new Promise(resolve => { guard = setTimeout(() => resolve(Error('test guard: collector did not return')), 3200); }),
     ]).finally(() => clearTimeout(guard));
-    assert.equal(failure.challenge, 'retailer-refusal');
+    assert.equal(failure.challenge, 'inspection-unavailable');
+    assert.equal(failure.frameHost, 'unknown');
     assert.equal(failure.short, undefined);
     assert.ok(performance.now() - started < 3000, 'passive inspection must have a bounded exit');
     assert.equal(page.trace.filter(value => value === 'click').length, ['after-click', 'renavigation'].includes(mode) ? 1 : 0);
@@ -196,23 +197,126 @@ test('passive inspection deadline stops pending frames without a retry', async t
   });
 });
 
-/** Apply one aggregate deadline rather than granting a new full timeout to every frame. */
-test('passive inspection shares its deadline across ordinary slow frames', async () => {
-  const page = fakePage([initial, complete]);
+/** Give readable frames independent bounded time even when their combined read exceeds two seconds. */
+test('passive inspection gives ordinary slow frames independent budgets', async () => {
+  const page = fakePage([complete]);
   let reads = 0;
-  const pending = [];
-  page.frames = () => Array.from({ length: 4 }, () => ({ isDetached: () => false, evaluate: () => {
+  page.frames = () => Array.from({ length: 2 }, () => ({ isDetached: () => false, evaluate: async () => {
     reads++;
-    return new Promise(resolve => { pending.push(setTimeout(() => resolve({ refusal: false }), 1100)); });
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    return { refusal: false };
   } }));
   const started = performance.now();
-  let error;
-  try { error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error); }
-  finally { for (const timer of pending) clearTimeout(timer); }
-  assert.equal(error.challenge, 'retailer-refusal');
-  assert.equal(reads, 2);
-  assert.ok(performance.now() - started < 2800);
-  assert.equal(page.trace.includes('click'), false);
+  assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }), /product-grid/);
+  assert.equal(reads, 4, 'both frames must be inspected at initial and final settling');
+  assert.ok(performance.now() - started >= 4000);
+  assert.deepEqual(page.trace, [SECTIONS[0].url]);
+});
+
+/** Stop distinctly on unreadable frames and never expose URL content in stop metadata. */
+test('unavailable inspection reports only the implicated sanitized host or unknown', async () => {
+  for (const [href, host] of [
+    ['https://user:secret@SLOW.Example:8443/private/path?token=secret#fragment', 'slow.example'],
+    ['https://frame.example./private', 'frame.example'],
+    ['data:text/html,private-secret', 'unknown'], ['about:blank', 'unknown'], ['not a URL', 'unknown'],
+  ]) {
+    const page = fakePage([initial]);
+    page.frames = () => [{ url: () => href, isDetached: () => false, evaluate: async () => { throw Error('private-secret rendered text'); } }];
+    const error = await collectSection(page, SECTIONS[0]).catch(error => error);
+    assert.equal(error.challenge, 'inspection-unavailable');
+    assert.equal(error.frameHost, host);
+    assert.equal(error.short, undefined);
+    assert.doesNotMatch(JSON.stringify({ message: error.message, ...error }), /secret|private|path|token|fragment|8443|https?:/);
+    assert.deepEqual(page.trace, [SECTIONS[0].url]);
+  }
+});
+
+/** Exercise actual framed reader output and retain safe identity without challenge input. */
+test('framed Press and Hold retains its host and detected kind', async () => {
+  const page = fakePage([initial]);
+  const frame = { url: () => 'https://user:secret@challenge.example/check?secret#private', isDetached: () => false,
+    evaluate: async (reader, options) => {
+      const saved = globalThis.document;
+      try { globalThis.document = { title: '', body: { innerText: 'Press and Hold' } }; return reader(options); }
+      finally { globalThis.document = saved; }
+    } };
+  page.frames = () => [frame];
+  const error = await collectSection(page, SECTIONS[0]).catch(error => error);
+  assert.equal(error.challenge, 'press-and-hold');
+  assert.equal(error.frameHost, 'challenge.example');
+  assert.doesNotMatch(JSON.stringify({ message: error.message, ...error }), /secret|private|check|https?:/);
+  assert.deepEqual(page.trace, [SECTIONS[0].url]);
+});
+
+/** Attribute a detected framed challenge to its own host even when an HTTP refusal was also observed. */
+test('detected framed challenge retains its own host beside an HTTP refusal', async () => {
+  const page = fakePage([initial, complete]);
+  const frame = { url: () => 'https://challenge.example/private?secret', isDetached: () => false,
+    evaluate: async () => page.trace.includes('click') ? { refusal: true, challenge: 'press-and-hold' } : { refusal: false } };
+  page.frames = () => [frame];
+  const locator = page.locator;
+  page.locator = selector => ({ ...locator(selector), click: async () => {
+    page.trace.push('click'); page.emit('response', response('https://shop.lululemon.com/private?secret', 403));
+  } });
+  const error = await collectSection(page, SECTIONS[0], { paceMs: 0 }).catch(error => error);
+  assert.equal(error.challenge, 'press-and-hold');
+  assert.equal(error.frameHost, 'challenge.example');
+  assert.equal(page.trace.filter(value => value === 'click').length, 1);
+});
+
+/** Run the real framed fixture only in an explicit offline headed browser validation session. */
+test('headed offline framed Press and Hold fixture stops without input', { skip: process.env.LULU_HEADED_FIXTURES !== '1' }, async () => {
+  const { chromium } = await import('playwright');
+  const browser = await chromium.launch({ channel: 'chrome', headless: false,
+    args: ['--proxy-server=127.0.0.1:9', '--proxy-bypass-list=<-loopback>', '--disable-background-networking'] });
+  let inputs = 0, listingClicks = 0, unexpectedRoutes = 0;
+  try {
+    const context = await browser.newContext({ serviceWorkers: 'block' });
+    await context.exposeBinding('fixtureInput', () => { inputs++; });
+    await context.exposeBinding('fixtureListingClick', () => { listingClicks++; });
+    await context.addInitScript(() => {
+      for (const event of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'touchstart', 'keydown']) {
+        addEventListener(event, () => { if (location.hostname === 'challenge.example') globalThis.fixtureInput(); }, true);
+      }
+    });
+    await context.route('**/*', async route => {
+      const host = new URL(route.request().url()).hostname;
+      if (host === 'challenge.example') return route.fulfill({ contentType: 'text/html', body: '<html><body><button>Press and Hold</button></body></html>' });
+      if (host === 'shop.lululemon.com') return route.fulfill({ contentType: 'text/html', body: grid(tile('fixture').replace(/<img[^>]*>/, '')) +
+        '<button data-lll-component-name="cdp:view_more_products" onclick="fixtureListingClick()">View More</button><iframe src="https://challenge.example/private?token=synthetic#fragment"></iframe>' });
+      unexpectedRoutes++; await route.abort();
+    });
+    const page = await context.newPage();
+    const goto = page.goto.bind(page);
+    page.goto = async (...args) => { const response = await goto(...args); await page.waitForLoadState('load'); return response; };
+    const error = await collectSection(page, SECTIONS[0], { paceMs: 0, readyTimeoutMs: 1 }).catch(error => error);
+    assert.equal(error.challenge, 'press-and-hold');
+    assert.equal(error.frameHost, 'challenge.example');
+    assert.equal(error.short, undefined);
+    assert.doesNotMatch(JSON.stringify({ message: error.message, ...error }), /private|token|fragment|synthetic|https?:/);
+    assert.equal(inputs, 0); assert.equal(listingClicks, 0); assert.equal(unexpectedRoutes, 0);
+  } finally { await browser.close(); }
+});
+
+/** Treat a loading child document or failed frame inventory as unavailable, never as proof of safety. */
+test('loading frame and frame churn fail closed with bounded metadata', async t => {
+  for (const mode of ['missing-body', 'inventory-failed', 'detachment-check-failed']) await t.test(mode, async () => {
+    const page = fakePage([initial]);
+    const frame = { url: () => 'https://loading.example/private?secret',
+      isDetached: () => { if (mode === 'detachment-check-failed') throw Error('private browser diagnostics'); return false; },
+      evaluate: async (reader, options) => {
+        if (mode === 'detachment-check-failed') throw Error('private read failure');
+        const saved = globalThis.document;
+        try { globalThis.document = { title: '', body: null }; return reader(options); }
+        finally { globalThis.document = saved; }
+      } };
+    page.frames = () => { if (mode === 'inventory-failed') throw Error('private frame inventory'); return [frame]; };
+    const error = await collectSection(page, SECTIONS[0], { readyTimeoutMs: 1, timeoutMs: 1, paceMs: 0 }).catch(error => error);
+    assert.equal(error.challenge, 'inspection-unavailable', mode);
+    assert.equal(error.frameHost, mode === 'inventory-failed' ? 'shop.lululemon.com' : 'loading.example');
+    assert.doesNotMatch(JSON.stringify({ message: error.message, ...error }), /private|secret|diagnostics/);
+    assert.deepEqual(page.trace, [SECTIONS[0].url]);
+  });
 });
 
 /** Clear deadline timers and consume a frame rejection that arrives after collection has stopped. */
@@ -227,7 +331,7 @@ test('passive deadline clears timers and consumes late evaluation rejection', as
   t.mock.method(globalThis, 'clearTimeout', timer => { outstanding.delete(timer); return clear(timer); });
   page.frames = () => [{ isDetached: () => false, evaluate: () => new Promise((_, reject) => { rejectLate = reject; }) }];
   const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error);
-  assert.equal(error.challenge, 'retailer-refusal');
+  assert.equal(error.challenge, 'inspection-unavailable');
   assert.equal(outstanding.size, 0);
   rejectLate(Error('private late frame error'));
   await new Promise(resolve => setImmediate(resolve));
@@ -243,7 +347,8 @@ test('failed listing click passive inspection deadline cannot hang on the main d
   page.locator = selector => ({ ...locator(selector), click: async () => { failed = true; attempts++; throw Error('click timed out'); } });
   const started = performance.now();
   const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error);
-  assert.equal(error.challenge, 'retailer-refusal');
+  assert.equal(error.challenge, 'inspection-unavailable');
+  assert.equal(error.frameHost, 'shop.lululemon.com');
   assert.equal(attempts, 1);
   assert.ok(performance.now() - started < 2800);
 });
@@ -253,7 +358,8 @@ test('unreadable non-detached frame fails closed even when its error claims deta
   const page = fakePage([initial, complete]);
   page.frames = () => [{ isDetached: () => false, evaluate: async () => { throw Error('Frame was detached private visitor URL'); } }];
   const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error);
-  assert.equal(error.challenge, 'retailer-refusal');
+  assert.equal(error.challenge, 'inspection-unavailable');
+  assert.equal(error.frameHost, 'unknown');
   assert.doesNotMatch(error.message, /private|visitor|detached/);
   assert.equal(page.trace.includes('click'), false);
 });
@@ -283,6 +389,7 @@ test('failed listing click receives one passive refusal inspection and no click 
     assert.equal(readsAfter, 1, mode);
     assert.equal(frameReadsAfter, mode === 'frame' ? 1 : 0);
     if (['frame', 'main'].includes(mode)) assert.equal(error.challenge, 'press-and-hold', mode);
+    else if (mode === 'read-failure') assert.equal(error.challenge, 'inspection-unavailable');
     else assert.equal(error, clickError, mode);
   }
 });
@@ -315,7 +422,9 @@ test('recorded refusal survives a failed browser call with bounded metadata', as
     const error = await collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(caught => caught);
     assert.equal(error.challenge, 'retailer-refusal', failedCall);
     assert.equal(error.short, undefined);
-    assert.match(error.message, /HTTP 403 \/blocked/);
+    assert.match(error.message, /HTTP 403/);
+    assert.equal(error.frameHost, 'shop.lululemon.com');
+    assert.doesNotMatch(error.message, /blocked/);
     assert.doesNotMatch(error.message, /private|secret|iframe|context/);
   }
 });
@@ -471,7 +580,8 @@ test('a 4xx on the View More product-data request (the section category) stops t
     const log = [];
     const page = clickingPage([initial, initial], [response(MEN_DATA, status, status % 2 ? 'fetch' : 'xhr')]);
     const error = await collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) }).catch(caught => caught);
-    assert.equal(error.message, `Collection refused by retailer: View More product-data request HTTP ${status} /.uf-svc/v1/categories/n18mhdznrqw. No publication.`);
+    assert.equal(error.message, `Collection refused by retailer: View More product-data request HTTP ${status}. No publication.`);
+    assert.equal(error.frameHost, 'shop.lululemon.com');
     assert.ok(log.includes(`Men product-data XHR after click 1: HTTP ${status} /.uf-svc/v1/categories/n18mhdznrqw`), log.join('\n'));
     assert.doesNotMatch(log.join('\n') + error.message, /secret|offset|slug|\?/);
     assert.deepEqual(page.trace, [SECTIONS[1].url, 'click']);
@@ -507,9 +617,8 @@ test('successful, non-XHR, other-host and pre-click responses do not stop expans
 test('401, 403 and 429 from any retailer resource still refuse, before or after a click, product data or not', async () => {
   for (const [status, url, type, when] of [[429, 'https://shop.lululemon.com/missing.png', 'image', 'after'], [403, 'https://shop.lululemon.com/api/dataenablement/profile', 'xhr', 'after'],
     [401, 'https://shop.lululemon.com/api/graphql', 'fetch', 'before'], [403, MEN_DATA, 'xhr', 'after']]) {
-    const path = new URL(url).pathname;
     const page = clickingPage([initial, initial], when === 'after' ? [response(url, status, type)] : [], when === 'before' ? [response(url, status, type)] : []);
-    const expected = url === MEN_DATA ? `View More product-data request HTTP ${status} ${path}` : `HTTP ${status} ${path}`;
+    const expected = url === MEN_DATA ? `View More product-data request HTTP ${status}` : `HTTP ${status}`;
     await assert.rejects(collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), { message: `Collection refused by retailer: ${expected}. No publication.` });
   }
 });
