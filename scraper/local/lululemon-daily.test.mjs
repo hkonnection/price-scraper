@@ -180,7 +180,8 @@ test('retailer challenge saves only bounded section and time, never retries or p
 test('inspection notices sanitize host metadata and preserve the unavailable kind', async () => {
   for (const [frameHost, expected] of [['slow.example', 'slow.example'], ['SLOW.EXAMPLE.', 'slow.example'],
     ['user:secret@slow.example/path?token=secret#private', 'unknown'], ['https://slow.example/private', 'unknown'],
-    ['bad\nhost', 'unknown'], ['', 'unknown'], [undefined, 'unknown']]) {
+    ['bad\nhost', 'unknown'], ['slow.example\n', 'unknown'], ['slow.example\r\n', 'unknown'],
+    ['slow.example\u2028', 'unknown'], ['', 'unknown'], [undefined, 'unknown']]) {
     const f = fixture();
     const failure = Object.assign(Error('private rendered text'), { challenge: 'inspection-unavailable', frameHost, short: true, grid: 'private partial HTML' });
     f.runtime.capture = async () => { throw failure; };
