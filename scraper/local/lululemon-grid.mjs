@@ -136,55 +136,107 @@ export function combineSections(captures, at) {
   return { payload: { deals, totalProducts: deals.length, sections: SECTIONS.map(({ name }) => ({ name, dealCount: [...owners.values()].filter(owner => owner === name).length })) }, stats };
 }
 
-/** Total budget for one passive UI inspection, not a timeout that skips unreadable frames. */
+/** Independent budget for each passive document read, never a timeout that skips unreadable frames. */
 const UI_READ_MS = 2000;
 
-/** Read listing and child-frame refusal facts within one shared budget, never frame controls or URLs. @param {import('playwright').Page} page Browser page. @returns {Promise<object>} Expansion/refusal status. @throws {Error} With bounded human-attention metadata on a deadline or unreadable attached frame; proven detachments are ignored. */
+/** Keep only a bounded DNS hostname or IPv4 address; reject URL content and unknown identity.
+ * @param {*} value Hostname, not a URL. @returns {string} Lowercase host without a trailing dot, or unknown.
+ */
+export function sanitizeStopHost(value) {
+  if (typeof value !== 'string' || value.length > 254) return 'unknown';
+  const host = value.toLowerCase().replace(/\.$/, '');
+  return host && host.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) ? host : 'unknown';
+}
+
+/** Read only a document's sanitized HTTP host, never retain its URL or browser diagnostics.
+ * @param {object} target Page or frame. @returns {string} Host or unknown when identity is unavailable.
+ */
+function documentHost(target) {
+  try { const url = new URL(target.url()); return ['http:', 'https:'].includes(url.protocol) ? sanitizeStopHost(url.hostname) : 'unknown'; }
+  catch { return 'unknown'; }
+}
+
+/** Read listing and child-frame refusal facts with independent bounded reads, never frame controls.
+ * @param {import('playwright').Page} page Browser page. @returns {Promise<object>} Expansion/refusal status and safe implicated host.
+ * @throws {Error} With inspection-unavailable metadata on a deadline or unreadable attached frame; proven detachments are ignored.
+ */
 async function uiState(page) {
-  const deadline = performance.now() + UI_READ_MS;
-  /** Stop when passive inspection cannot establish safety, without copying browser diagnostics. @returns {Error} Bounded refusal. */
-  function unreadable() { return Object.assign(new Error('Collection stopped: passive refusal inspection unavailable. Human attention required. No publication.'), { challenge: 'retailer-refusal' }); }
-  /** Bound one read by the remaining shared budget; race handlers consume late rejections and the timer is always cleared. @param {import('playwright').Page|import('playwright').Frame} target Document. @param {boolean} refusalOnly Child-frame mode. @returns {Promise<object>} UI facts. @throws {Error} On a deadline or failed evaluation. */
+  /** Stop when passive inspection cannot establish safety, without claiming a detected challenge.
+   * @param {string} frameHost Sanitized host. @returns {Error} Bounded inspection failure.
+   */
+  function unreadable(frameHost) { return Object.assign(new Error('Collection stopped: passive refusal inspection unavailable. Human attention required. No publication.'), { challenge: 'inspection-unavailable', frameHost }); }
+  /** Give one document its own budget, including transient loading polls. Consume late results without further reads.
+   * Successful identity comes from the inspected document; failures sample current safe identity without another evaluation.
+   * @param {import('playwright').Page|import('playwright').Frame} target Document. @param {boolean} refusalOnly Child-frame mode.
+   * @returns {Promise<object>} UI facts and sanitized identity. @throws {Error} On a deadline or missing/failed inspection.
+   */
   async function read(target, refusalOnly) {
-    let timer;
-    try {
-      const remaining = deadline - performance.now();
-      if (remaining <= 0) throw unreadable();
-      return await Promise.race([target.evaluate(readUiFacts, { refusalOnly }),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(unreadable()), remaining); })]);
-    } finally { clearTimeout(timer); }
+    return new Promise((resolve, reject) => {
+      let done = false, poll;
+      const timer = setTimeout(() => finish(null), UI_READ_MS);
+      /** Settle once and release both timers, never retaining browser diagnostics.
+       * @param {object|null} facts Readable facts, or null on inspection failure. @returns {void}
+       */
+      function finish(facts) {
+        if (done) return;
+        done = true; clearTimeout(timer); clearTimeout(poll);
+        if (!facts) reject(unreadable(documentHost(target)));
+        else resolve({ ...facts, frameHost: sanitizeStopHost(facts.frameHost ?? documentHost(target)) });
+      }
+      /** Read only while this document's original budget remains active. @returns {void} */
+      function inspect() {
+        if (done) return;
+        Promise.resolve().then(() => target.evaluate(readUiFacts, { refusalOnly })).then(facts => {
+          if (done) return;
+          if (!facts || typeof facts.refusal !== 'boolean' || (facts.unavailable && !facts.refusal)) finish(null);
+          else if (facts.loading && !facts.refusal) poll = setTimeout(inspect, 25);
+          else finish(facts);
+        }, () => finish(null));
+      }
+      inspect();
+    });
   }
   let raw = await read(page, false);
-  if (!raw.refusal) for (const frame of page.frames()) {
-    if (frame === page.mainFrame()) continue;
+  if (raw.refusal) return classifyUiState(raw);
+  let frames, main;
+  try { frames = page.frames(); main = page.mainFrame(); }
+  catch { throw unreadable(documentHost(page)); }
+  for (const frame of frames) {
+    if (frame === main) continue;
     let facts;
     try { facts = await read(frame, true); }
-    catch {
-      if (frame.isDetached?.() === true) continue;
-      throw unreadable(); // A navigating or timed-out frame may contain a challenge.
+    catch (error) {
+      let detached = false;
+      try { detached = frame.isDetached?.() === true; } catch { /* Missing native proof is not a detachment. */ }
+      if (detached) continue;
+      throw error; // An unreadable attached frame may contain a challenge, but none was detected.
     }
     if (facts.refusal) {
-      raw = { ...raw, refusal: true, ...(facts.challenge === 'press-and-hold' ? { challenge: 'press-and-hold' } : {}) };
+      raw = { ...raw, refusal: true, frameHost: facts.frameHost, ...(facts.challenge === 'press-and-hold' ? { challenge: 'press-and-hold' } : {}) };
       break;
     }
   }
   return classifyUiState(raw);
 }
 
-/** Runs inside the page: read UI facts only. A document without a body yet (mid-navigation) reads as not settled.
+/** Runs inside the page: read UI facts and hostname from the same document. Only bodyless child loading waits within its read budget.
+ * Bodyless HTML roots use title only, never head-script text. SVG/XML retain DOM text inspection; readable bodies do not wait for parser completion.
  * `link.handled` says whether the page script has taken over the View More link: React puts its props on every element it has hydrated.
  * Before that, a click on the server-rendered link is an ordinary navigation to `?page=2` and no product-data request is sent.
  * Press & Hold is a refusal, never an interaction target. Only its bounded kind leaves the reader, not the rendered text.
  * @param {object} [options={}] Reader mode. @param {boolean} [options.refusalOnly=false] Read only title and rendered refusal text for a child frame.
- * @returns {object} Raw UI facts with optional challenge kind, or bounded refusal facts only.
+ * @returns {object} UI facts with document host and optional challenge kind; child facts mark loading or a missing passive text surface.
  */
 export function readUiFacts({ refusalOnly = false } = {}) {
     const refusalText = /access denied|access to this page has been denied|request blocked|verify (?:that )?you are (?:a )?human|are you a robot\?|unusual traffic|captcha|security challenge|temporarily blocked|pardon our interruption/i;
-    const text = (document.title || '') + ' ' + (document.body?.innerText || '');
+    const frameHost = ['http:', 'https:'].includes(globalThis.location?.protocol) ? globalThis.location.hostname : 'unknown';
+    const surface = document.body ? document.body.innerText : document.documentElement?.namespaceURI === 'http://www.w3.org/1999/xhtml' ? '' : document.documentElement?.textContent;
+    const text = (document.title || '') + ' ' + (typeof surface === 'string' ? surface : '');
     const challenge = /\bpress[\s\u200b-]*(?:&|\uFF06|and)[\s\u200b-]*hold\b/i.test(text) ? { challenge: 'press-and-hold' } : {};
     const refusal = refusalText.test(text) || Boolean(challenge.challenge);
-    if (refusalOnly) return { refusal, ...challenge };
-    if (!document.body) return { grids: 0, cards: 0, total: null, buttons: 0, visibleButtons: 0, enabled: false, indicators: [], refusal, ...challenge };
+    if (refusalOnly) return { refusal, ...challenge, frameHost,
+      ...(!refusal && !document.body && document.readyState === 'loading' ? { loading: true } : !refusal && typeof surface !== 'string' ? { unavailable: true } : {}) };
+    if (!document.body) return { grids: 0, cards: 0, total: null, buttons: 0, visibleButtons: 0, enabled: false, indicators: [], refusal, ...challenge, frameHost };
     /** Test ordinary rendered visibility. @param {Element} el Element. @returns {boolean} Visible. */
     function visible(el) { return Boolean(el.getClientRects().length) && getComputedStyle(el).visibility !== 'hidden'; }
     const grids = [...document.querySelectorAll('[data-testid="product-grid"]')];
@@ -203,7 +255,7 @@ export function readUiFacts({ refusalOnly = false } = {}) {
       link: shown.length === 1 ? { disabled: Boolean(shown[0].disabled), ariaDisabled: shown[0].getAttribute('aria-disabled'), handled: Object.keys(shown[0]).some(key => key.startsWith('__reactProps$')) } : null,
       timeOrigin: performance.timeOrigin,
       indicators: [...document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [data-testid*="loading"]')].filter(visible).map(el => ({ carousel: Boolean(el.closest('[class*="carousel"]')) })),
-      refusal, ...challenge };
+      refusal, ...challenge, frameHost };
 }
 
 /** Derive loading from visible indicators; product image carousel progress bars stay on screen and never mean loading. @param {object} raw Browser-read UI facts. @returns {object} UI state with busy. */
@@ -310,8 +362,8 @@ export async function collectSection(page, section, settings = {}) {
     const call = clicks > 0 && (type === 'xhr' || type === 'fetch');
     const productData = call && url.pathname === dataPath;
     if (call) note(`${section.name} ${productData ? 'product-data ' : ''}XHR after click ${clicks}: HTTP ${status} ${logPath(url)}`);
-    if (!refused && productData && status >= 400 && status < 500) refused = `View More product-data request HTTP ${status} ${logPath(url)}`;
-    else if (!refused && [401, 403, 429].includes(status)) refused = `HTTP ${status} ${logPath(url)}`;
+    if (!refused && productData && status >= 400 && status < 500) refused = { reason: `View More product-data request HTTP ${status}`, frameHost: sanitizeStopHost(url.hostname) };
+    else if (!refused && [401, 403, 429].includes(status)) refused = { reason: `HTTP ${status}`, frameHost: sanitizeStopHost(url.hostname) };
     if (productData && status >= 200 && status < 300) {
       dataTotals.push(Promise.resolve().then(() => response.json()).then(body => (Number.isInteger(body?.data?.attributes?.totalCount) ? body.data.attributes.totalCount : null), () => null));
     }
@@ -333,10 +385,10 @@ export async function collectSection(page, section, settings = {}) {
     const requests = Object.entries(a.retailer).map(([type, count]) => `${type} ${count}`).join(', ') || 'none';
     note(`${section.name} after click ${a.click}: URL ${a.url} → ${currentAt()}, cards ${a.cards} → ${state?.cards ?? 'unknown'}, document ${document}, main-frame navigations ${a.navigations}, load events ${a.loads}, DOMContentLoaded ${a.contentLoads}, retailer requests ${requests}, other-host requests ${a.otherHosts}.`);
   }
-  /** Stop on a refusal and expose only its bounded kind for private operator reporting. @param {object} state UI state. @returns {void} @throws {Error} On refusal, never marked for re-paging. */
+  /** Stop on a refusal and expose only its bounded kind and host for private operator reporting. @param {object} state UI state. @returns {void} @throws {Error} On refusal, never marked for re-paging. */
   function stopIfRefused(state) {
-    if (refused || state.refusal) throw Object.assign(new Error(`Collection refused by retailer${refused ? ': ' + refused : ''}. No publication.`),
-      { challenge: state.challenge === 'press-and-hold' ? 'press-and-hold' : 'retailer-refusal' });
+    if (refused || state.refusal) throw Object.assign(new Error(`Collection refused by retailer${refused ? ': ' + refused.reason : ''}. No publication.`),
+      { challenge: state.challenge === 'press-and-hold' ? 'press-and-hold' : 'retailer-refusal', frameHost: state.refusal ? sanitizeStopHost(state.frameHost) : refused?.frameHost ?? 'unknown' });
   }
   /** Log the repeat count of the unlogged identical checks, named by the last of them. @returns {void} */
   function flushRepeats() {
@@ -356,7 +408,7 @@ export async function collectSection(page, section, settings = {}) {
   page.on('response', onResponse); page.on('framenavigated', onNavigated); page.on('load', onLoad); page.on('domcontentloaded', onContentLoaded);
   try {
     const response = await page.goto(section.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    if (!response?.ok()) throw Object.assign(new Error(`Collection refused: HTTP ${response?.status() ?? 'unknown'}${await refusalShape(response)}.`), { challenge: 'retailer-refusal' });
+    if (!response?.ok()) throw Object.assign(new Error(`Collection refused: HTTP ${response?.status() ?? 'unknown'}${await refusalShape(response)}.`), { challenge: 'retailer-refusal', frameHost: documentHost(page) });
     let previous = 0, expectGrowth = false;
     while (true) {
       let state;
@@ -416,7 +468,7 @@ export async function collectSection(page, section, settings = {}) {
     }
   } catch (error) {
     // A recorded retailer refusal outranks a later navigation, evaluation or click failure.
-    if (refused && !error?.challenge) throw Object.assign(new Error(`Collection refused by retailer: ${refused}. No publication.`), { challenge: 'retailer-refusal' });
+    if (refused && (!error?.challenge || error.challenge === 'inspection-unavailable')) stopIfRefused({ refusal: false });
     throw error;
   } finally {
     reportAfterClick(lastState); flushRepeats();

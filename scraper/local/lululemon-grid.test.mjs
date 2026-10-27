@@ -187,7 +187,8 @@ test('passive inspection deadline stops pending frames without a retry', async t
       collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error),
       new Promise(resolve => { guard = setTimeout(() => resolve(Error('test guard: collector did not return')), 3200); }),
     ]).finally(() => clearTimeout(guard));
-    assert.equal(failure.challenge, 'retailer-refusal');
+    assert.equal(failure.challenge, 'inspection-unavailable');
+    assert.equal(failure.frameHost, 'unknown');
     assert.equal(failure.short, undefined);
     assert.ok(performance.now() - started < 3000, 'passive inspection must have a bounded exit');
     assert.equal(page.trace.filter(value => value === 'click').length, ['after-click', 'renavigation'].includes(mode) ? 1 : 0);
@@ -196,23 +197,307 @@ test('passive inspection deadline stops pending frames without a retry', async t
   });
 });
 
-/** Apply one aggregate deadline rather than granting a new full timeout to every frame. */
-test('passive inspection shares its deadline across ordinary slow frames', async () => {
-  const page = fakePage([initial, complete]);
+/** Give readable frames independent bounded time even when their combined read exceeds two seconds. */
+test('passive inspection gives ordinary slow frames independent budgets', async () => {
+  const page = fakePage([complete]);
   let reads = 0;
-  const pending = [];
-  page.frames = () => Array.from({ length: 4 }, () => ({ isDetached: () => false, evaluate: () => {
+  page.frames = () => Array.from({ length: 2 }, () => ({ isDetached: () => false, evaluate: async () => {
     reads++;
-    return new Promise(resolve => { pending.push(setTimeout(() => resolve({ refusal: false }), 1100)); });
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    return { refusal: false };
   } }));
   const started = performance.now();
-  let error;
-  try { error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error); }
-  finally { for (const timer of pending) clearTimeout(timer); }
-  assert.equal(error.challenge, 'retailer-refusal');
+  assert.match(await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }), /product-grid/);
+  assert.equal(reads, 4, 'both frames must be inspected at initial and final settling');
+  assert.ok(performance.now() - started >= 4000);
+  assert.deepEqual(page.trace, [SECTIONS[0].url]);
+});
+
+/** Stop distinctly on unreadable frames and never expose URL content in stop metadata. */
+test('unavailable inspection reports only the implicated sanitized host or unknown', async () => {
+  for (const [href, host] of [
+    ['https://user:secret@SLOW.Example:8443/private/path?token=secret#fragment', 'slow.example'],
+    ['https://frame.example./private', 'frame.example'],
+    ['data:text/html,private-secret', 'unknown'], ['about:blank', 'unknown'], ['not a URL', 'unknown'],
+  ]) {
+    const page = fakePage([initial]);
+    page.frames = () => [{ url: () => href, isDetached: () => false, evaluate: async () => { throw Error('private-secret rendered text'); } }];
+    const error = await collectSection(page, SECTIONS[0]).catch(error => error);
+    assert.equal(error.challenge, 'inspection-unavailable');
+    assert.equal(error.frameHost, host);
+    assert.equal(error.short, undefined);
+    assert.doesNotMatch(JSON.stringify({ message: error.message, ...error }), /secret|private|path|token|fragment|8443|https?:/);
+    assert.deepEqual(page.trace, [SECTIONS[0].url]);
+  }
+});
+
+/** Exercise actual framed reader output and retain safe identity without challenge input. */
+test('framed Press and Hold retains its host and detected kind', async () => {
+  const page = fakePage([initial]);
+  const frame = { url: () => 'https://user:secret@challenge.example/check?secret#private', isDetached: () => false,
+    evaluate: async () => frameDocumentFacts({ title: '', body: { innerText: 'Press and Hold' } }, 'challenge.example') };
+  page.frames = () => [frame];
+  const error = await collectSection(page, SECTIONS[0]).catch(error => error);
+  assert.equal(error.challenge, 'press-and-hold');
+  assert.equal(error.frameHost, 'challenge.example');
+  assert.doesNotMatch(JSON.stringify({ message: error.message, ...error }), /secret|private|check|https?:/);
+  assert.deepEqual(page.trace, [SECTIONS[0].url]);
+});
+
+/** Attribute a detected framed challenge to its own host even when an HTTP refusal was also observed. */
+test('detected framed challenge retains its own host beside an HTTP refusal', async () => {
+  const page = fakePage([initial, complete]);
+  const frame = { url: () => 'https://challenge.example/private?secret', isDetached: () => false,
+    evaluate: async () => page.trace.includes('click') ? { refusal: true, challenge: 'press-and-hold' } : { refusal: false } };
+  page.frames = () => [frame];
+  const locator = page.locator;
+  page.locator = selector => ({ ...locator(selector), click: async () => {
+    page.trace.push('click'); page.emit('response', response('https://shop.lululemon.com/private?secret', 403));
+  } });
+  const error = await collectSection(page, SECTIONS[0], { paceMs: 0 }).catch(error => error);
+  assert.equal(error.challenge, 'press-and-hold');
+  assert.equal(error.frameHost, 'challenge.example');
+  assert.equal(page.trace.filter(value => value === 'click').length, 1);
+});
+
+/** Read a synthetic child document and its identity through the real passive reader. @param {object} document Document surface. @param {string} host Inspected host. @returns {object} Passive facts. */
+function frameDocumentFacts(document, host = 'inspected.example') {
+  const saved = { document: globalThis.document, location: globalThis.location };
+  try { globalThis.document = document; globalThis.location = { hostname: host, protocol: 'https:' }; return readUiFacts({ refusalOnly: true }); }
+  finally { Object.assign(globalThis, saved); }
+}
+
+/** Bind successful facts to the inspected document, not the URL before or after evaluation. */
+test('inspected document supplies host across committing and navigating frame reads', async () => {
+  for (const before of ['', 'https://earlier.example/private?secret']) {
+    const page = fakePage([initial]);
+    let href = before;
+    page.frames = () => [{ url: () => href, isDetached: () => false, evaluate: async () => {
+      const facts = frameDocumentFacts({ title: '', body: { innerText: 'Press and Hold' }, readyState: 'complete' }, 'challenge.example');
+      href = 'https://later.example/private?secret';
+      return facts;
+    } }];
+    const error = await collectSection(page, SECTIONS[0]).catch(error => error);
+    assert.equal(error.challenge, 'press-and-hold');
+    assert.equal(error.frameHost, 'challenge.example');
+    assert.doesNotMatch(JSON.stringify({ message: error.message, ...error }), /earlier|later|private|secret|https?:/);
+    assert.deepEqual(page.trace, [SECTIONS[0].url]);
+  }
+});
+
+/** Attribute failed or pending inspection to current identity without a second evaluation. */
+test('failed and timed-out frame reads use failure-time safe identity', async () => {
+  for (const pending of [false, true]) {
+    const page = fakePage([initial]);
+    let href = '', reads = 0;
+    page.frames = () => [{ url: () => href, isDetached: () => false, evaluate: async () => {
+      reads++; href = 'https://user:secret@current.example:8443/private?secret#fragment';
+      if (pending) return new Promise(() => {});
+      throw Error('private browser failure');
+    } }];
+    const error = await collectSection(page, SECTIONS[0]).catch(error => error);
+    assert.equal(error.challenge, 'inspection-unavailable');
+    assert.equal(error.frameHost, 'current.example');
+    assert.equal(reads, 1);
+    assert.doesNotMatch(JSON.stringify({ message: error.message, ...error }), /private|secret|8443|fragment|https?:/);
+  }
+});
+
+/** Inspect readable empty documents and bodyless challenge content instead of requiring an HTML body. */
+test('readable bodyless surfaces are inspected while missing surfaces fail closed', async t => {
+  for (const [name, document, kind] of [
+    ['empty-svg', { title: '', body: null, documentElement: { textContent: '' }, readyState: 'complete' }, null],
+    ['empty-html', { title: '', body: null, documentElement: { textContent: '' }, readyState: 'interactive' }, null],
+    ['empty-rendered-html', { title: '', body: null, documentElement: { namespaceURI: 'http://www.w3.org/1999/xhtml', innerText: '', textContent: 'security challenge in a head script' }, readyState: 'complete' }, null],
+    ['svg-challenge', { title: '', body: null, documentElement: { textContent: 'Press and Hold' }, readyState: 'complete' }, 'press-and-hold'],
+    ['loading-challenge', { title: '', body: null, documentElement: { textContent: 'Press and Hold' }, readyState: 'loading' }, 'press-and-hold'],
+    ['missing-root', { title: '', body: null, documentElement: null, readyState: 'complete' }, 'inspection-unavailable'],
+  ]) await t.test(name, async () => {
+    const page = fakePage([complete]);
+    page.frames = () => [{ url: () => 'https://surface.example/private', isDetached: () => false,
+      evaluate: async () => frameDocumentFacts(document, 'surface.example') }];
+    const result = await collectSection(page, SECTIONS[0], { paceMs: 0 }).catch(error => error);
+    if (kind) { assert.equal(result.challenge, kind); assert.equal(result.frameHost, 'surface.example'); }
+    else assert.match(result, /product-grid/);
+    assert.deepEqual(page.trace, [SECTIONS[0].url]);
+  });
+});
+
+/** Exclude HTML head text regardless of root innerText, while retaining title and non-HTML challenge detection. */
+test('bodyless HTML checks title only and SVG XML keep DOM text inspection', () => {
+  const html = { namespaceURI: 'http://www.w3.org/1999/xhtml', innerText: 'captcha widget settings', textContent: 'captcha widget settings' };
+  const empty = frameDocumentFacts({ title: '', body: null, documentElement: html, readyState: 'loading' });
+  assert.equal(empty.refusal, false);
+  assert.equal(empty.loading, true);
+  for (const [title, root] of [['Press and Hold', html], ['', { namespaceURI: 'http://www.w3.org/2000/svg', textContent: 'Press and Hold' }],
+    ['', { namespaceURI: 'urn:fixture', textContent: 'Press and Hold' }]]) {
+    const facts = frameDocumentFacts({ title, body: null, documentElement: root, readyState: 'loading' });
+    assert.equal(facts.challenge, 'press-and-hold');
+    assert.equal(facts.frameHost, 'inspected.example');
+    assert.equal(facts.loading, undefined);
+  }
+});
+
+/** A readable body is inspected now, even if its parser never closes. */
+test('readable body remains inspectable in loading state', () => {
+  for (const text of ['', 'Friendly synthetic ad', 'Press and Hold']) {
+    const facts = frameDocumentFacts({ title: '', body: { innerText: text }, readyState: 'loading' });
+    assert.equal(facts.loading, undefined);
+    assert.equal(facts.unavailable, undefined);
+    assert.equal(facts.refusal, text === 'Press and Hold');
+  }
+});
+
+/** Let transient frame loading settle only inside its original two-second document bound. */
+test('loading frames settle within one budget or stop unavailable without a click', async t => {
+  for (const settles of [true, false]) await t.test(settles ? 'settles' : 'permanent-loading', async () => {
+    const page = fakePage([complete]);
+    let reads = 0;
+    page.frames = () => [{ url: () => 'https://loading.example/private', isDetached: () => false, evaluate: async () => {
+      reads++;
+      return frameDocumentFacts({ title: '', body: null, documentElement: { textContent: '' },
+        readyState: settles && reads > 2 ? 'complete' : 'loading' }, 'loading.example');
+    } }];
+    const started = performance.now();
+    const result = await collectSection(page, SECTIONS[0], { paceMs: 0 }).catch(error => error);
+    if (settles) { assert.match(result, /product-grid/); assert.ok(reads >= 3); }
+    else { assert.equal(result.challenge, 'inspection-unavailable'); assert.ok(performance.now() - started >= 1800); assert.ok(performance.now() - started < 3000); }
+    assert.deepEqual(page.trace, [SECTIONS[0].url]);
+  });
+});
+
+/** Stop loading polls at the same deadline and consume a late pending read without scheduling another. */
+test('loading inspection clears timers and never resumes after a late result', async t => {
+  const page = fakePage([complete]);
+  let reads = 0, resolveLate;
+  const outstanding = new Set();
+  const start = globalThis.setTimeout, clear = globalThis.clearTimeout;
+  t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => {
+    const timer = start(() => { outstanding.delete(timer); callback(...args); }, ms); outstanding.add(timer); return timer;
+  });
+  t.mock.method(globalThis, 'clearTimeout', timer => { outstanding.delete(timer); return clear(timer); });
+  page.frames = () => [{ url: () => 'https://loading.example/private', isDetached: () => false, evaluate: async () => {
+    if (++reads === 1) return { refusal: false, loading: true };
+    return new Promise(resolve => { resolveLate = resolve; });
+  } }];
+  const error = await collectSection(page, SECTIONS[0], { paceMs: 0 }).catch(error => error);
+  assert.equal(error.challenge, 'inspection-unavailable');
   assert.equal(reads, 2);
-  assert.ok(performance.now() - started < 2800);
-  assert.equal(page.trace.includes('click'), false);
+  assert.equal(outstanding.size, 0);
+  resolveLate({ refusal: false, loading: true });
+  await new Promise(resolve => start(resolve, 50));
+  assert.equal(reads, 2);
+  assert.equal(outstanding.size, 0);
+});
+
+/** Run the real framed fixture at production DOMContentLoaded pacing, with no extra load wait. */
+test('headed offline framed Press and Hold fixture stops without input', { skip: process.env.LULU_HEADED_FIXTURES !== '1' }, async () => {
+  const { chromium } = await import('playwright');
+  const browser = await chromium.launch({ channel: 'chrome', headless: false,
+    args: ['--proxy-server=127.0.0.1:9', '--proxy-bypass-list=<-loopback>', '--disable-background-networking', '--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1'] });
+  let inputs = 0, listingClicks = 0, unexpectedRoutes = 0;
+  try {
+    const context = await browser.newContext({ serviceWorkers: 'block' });
+    await context.exposeBinding('fixtureInput', () => { inputs++; });
+    await context.exposeBinding('fixtureListingClick', () => { listingClicks++; });
+    await context.addInitScript(() => {
+      for (const event of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'touchstart', 'keydown']) {
+        addEventListener(event, () => { if (location.hostname === 'challenge.example') globalThis.fixtureInput(); }, true);
+      }
+    });
+    await context.route('**/*', async route => {
+      const host = new URL(route.request().url()).hostname;
+      if (host === 'challenge.example') {
+        await new Promise(resolve => setTimeout(resolve, 100)); // Commit after the main document is parsed.
+        return route.fulfill({ contentType: 'text/html', body: '<html><body><button>Press and Hold</button></body></html>' });
+      }
+      if (host === 'shop.lululemon.com') return route.fulfill({ contentType: 'text/html', body: grid(tile('fixture').replace(/<img[^>]*>/, '')) +
+        '<button data-lll-component-name="cdp:view_more_products" onclick="fixtureListingClick()">View More</button><iframe src="https://challenge.example/private?token=synthetic#fragment"></iframe>' });
+      unexpectedRoutes++; await route.abort();
+    });
+    const page = await context.newPage();
+    const error = await collectSection(page, SECTIONS[0], { paceMs: 0, readyTimeoutMs: 1 }).catch(error => error);
+    assert.equal(error.challenge, 'press-and-hold');
+    assert.equal(error.frameHost, 'challenge.example');
+    assert.equal(error.short, undefined);
+    assert.doesNotMatch(JSON.stringify({ message: error.message, ...error }), /private|token|fragment|synthetic|https?:/);
+    assert.equal(inputs, 0); assert.equal(listingClicks, 0); assert.equal(unexpectedRoutes, 0);
+  } finally { await browser.close(); }
+});
+
+/** Prove readable ad frames complete with production pacing and without a pre-inspection load wait. */
+for (const mode of ['hidden-head-script', 'body-parser-block', 'open-document']) {
+  test(`headed offline readable frame ${mode} completes without false refusal`, { skip: process.env.LULU_HEADED_FIXTURES !== '1' }, async () => {
+    const { chromium } = await import('playwright');
+    const browser = await chromium.launch({ channel: 'chrome', headless: false,
+      args: ['--proxy-server=127.0.0.1:9', '--proxy-bypass-list=<-loopback>', '--disable-background-networking', '--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1'] });
+    let inputs = 0, listingClicks = 0, unexpectedRoutes = 0, script = Promise.resolve();
+    const surfaces = [];
+    try {
+      const context = await browser.newContext({ serviceWorkers: 'block' });
+      await context.exposeBinding('fixtureSurface', (_, facts) => { surfaces.push(facts); });
+      await context.exposeBinding('fixtureInput', () => { inputs++; });
+      await context.exposeBinding('fixtureListingClick', () => { listingClicks++; });
+      await context.addInitScript(() => {
+        for (const event of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'touchstart', 'keydown']) {
+          addEventListener(event, () => { if (location.hostname !== 'shop.lululemon.com') globalThis.fixtureInput(); }, true);
+        }
+      });
+      await context.route('**/*', async route => {
+        const url = new URL(route.request().url());
+        if (url.hostname === 'readable.example' && url.pathname === '/block.js') {
+          script = new Promise(resolve => setTimeout(resolve, mode === 'hidden-head-script' ? 500 : 3500))
+            .then(() => route.fulfill({ contentType: 'application/javascript', body: '/* synthetic parser release */' }));
+          return script;
+        }
+        if (url.hostname === 'readable.example') {
+          const report = '<script>fixtureSurface({hasBody:!!document.body,readyState:document.readyState});</script>';
+          const body = mode === 'hidden-head-script'
+            ? '<html><head><script>var vendorConfig="captcha widget settings";</script>' + report + '<script src="https://readable.example/block.js"></script></head><body>Friendly synthetic ad</body></html>'
+            : '<html><body>Friendly synthetic ad' + report + '<script src="https://readable.example/block.js"></script></body></html>';
+          return route.fulfill({ contentType: 'text/html', body });
+        }
+        if (url.hostname === 'shop.lululemon.com') {
+          const catalog = { props: { pageProps: { dehydratedState: { queries: [{ queryKey: ['catalogPageData'], state: { data: { pages: [{ data: { attributes: { totalCount: 1 } } }] } } }] } } } };
+          const child = mode === 'open-document'
+            ? '<iframe id="ad"></iframe><script>const ad=document.getElementById("ad").contentDocument;ad.open();ad.write("<html><body>Friendly synthetic ad</body>");fixtureSurface({hasBody:!!ad.body,readyState:ad.readyState});</script>'
+            : `<iframe ${mode === 'hidden-head-script' ? 'style="display:none"' : ''} src="https://readable.example/frame?token=synthetic#fragment"></iframe>`;
+          return route.fulfill({ contentType: 'text/html', body: '<html><body><script id="__NEXT_DATA__" type="application/json">' + JSON.stringify(catalog) + '</script>' +
+            grid(tile('fixture').replace(/<img[^>]*>/, '')) + child + '</body></html>' });
+        }
+        unexpectedRoutes++; await route.abort();
+      });
+      const page = await context.newPage();
+      const html = await collectSection(page, SECTIONS[0]);
+      assert.match(html, /product-grid/);
+      assert.ok(surfaces.some(facts => facts.hasBody === (mode !== 'hidden-head-script') && facts.readyState === 'loading'), JSON.stringify(surfaces));
+      assert.equal(inputs, 0); assert.equal(listingClicks, 0); assert.equal(unexpectedRoutes, 0);
+    } finally {
+      await script.catch(() => {}); // Await fixture-response cleanup after collection, never add a pre-inspection load wait.
+      await browser.close();
+    }
+  });
+}
+
+/** Treat a loading child document or failed frame inventory as unavailable, never as proof of safety. */
+test('loading frame and frame churn fail closed with bounded metadata', async t => {
+  for (const mode of ['missing-body', 'inventory-failed', 'detachment-check-failed']) await t.test(mode, async () => {
+    const page = fakePage([initial]);
+    const frame = { url: () => 'https://loading.example/private?secret',
+      isDetached: () => { if (mode === 'detachment-check-failed') throw Error('private browser diagnostics'); return false; },
+      evaluate: async (reader, options) => {
+        if (mode === 'detachment-check-failed') throw Error('private read failure');
+        const saved = globalThis.document;
+        try { globalThis.document = { title: '', body: null }; return reader(options); }
+        finally { globalThis.document = saved; }
+      } };
+    page.frames = () => { if (mode === 'inventory-failed') throw Error('private frame inventory'); return [frame]; };
+    const error = await collectSection(page, SECTIONS[0], { readyTimeoutMs: 1, timeoutMs: 1, paceMs: 0 }).catch(error => error);
+    assert.equal(error.challenge, 'inspection-unavailable', mode);
+    assert.equal(error.frameHost, mode === 'inventory-failed' ? 'shop.lululemon.com' : 'loading.example');
+    assert.doesNotMatch(JSON.stringify({ message: error.message, ...error }), /private|secret|diagnostics/);
+    assert.deepEqual(page.trace, [SECTIONS[0].url]);
+  });
 });
 
 /** Clear deadline timers and consume a frame rejection that arrives after collection has stopped. */
@@ -227,7 +512,7 @@ test('passive deadline clears timers and consumes late evaluation rejection', as
   t.mock.method(globalThis, 'clearTimeout', timer => { outstanding.delete(timer); return clear(timer); });
   page.frames = () => [{ isDetached: () => false, evaluate: () => new Promise((_, reject) => { rejectLate = reject; }) }];
   const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error);
-  assert.equal(error.challenge, 'retailer-refusal');
+  assert.equal(error.challenge, 'inspection-unavailable');
   assert.equal(outstanding.size, 0);
   rejectLate(Error('private late frame error'));
   await new Promise(resolve => setImmediate(resolve));
@@ -243,7 +528,8 @@ test('failed listing click passive inspection deadline cannot hang on the main d
   page.locator = selector => ({ ...locator(selector), click: async () => { failed = true; attempts++; throw Error('click timed out'); } });
   const started = performance.now();
   const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error);
-  assert.equal(error.challenge, 'retailer-refusal');
+  assert.equal(error.challenge, 'inspection-unavailable');
+  assert.equal(error.frameHost, 'shop.lululemon.com');
   assert.equal(attempts, 1);
   assert.ok(performance.now() - started < 2800);
 });
@@ -253,7 +539,8 @@ test('unreadable non-detached frame fails closed even when its error claims deta
   const page = fakePage([initial, complete]);
   page.frames = () => [{ isDetached: () => false, evaluate: async () => { throw Error('Frame was detached private visitor URL'); } }];
   const error = await collectSection(page, SECTIONS[0], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(error => error);
-  assert.equal(error.challenge, 'retailer-refusal');
+  assert.equal(error.challenge, 'inspection-unavailable');
+  assert.equal(error.frameHost, 'unknown');
   assert.doesNotMatch(error.message, /private|visitor|detached/);
   assert.equal(page.trace.includes('click'), false);
 });
@@ -283,6 +570,7 @@ test('failed listing click receives one passive refusal inspection and no click 
     assert.equal(readsAfter, 1, mode);
     assert.equal(frameReadsAfter, mode === 'frame' ? 1 : 0);
     if (['frame', 'main'].includes(mode)) assert.equal(error.challenge, 'press-and-hold', mode);
+    else if (mode === 'read-failure') assert.equal(error.challenge, 'inspection-unavailable');
     else assert.equal(error, clickError, mode);
   }
 });
@@ -293,7 +581,7 @@ test('frame refusal reader needs no grid, product, or link DOM query', () => {
   try {
     globalThis.document = { title: '', body: { innerText: 'Press & Hold' },
       querySelectorAll: () => { throw Error('frame DOM query forbidden'); } };
-    assert.deepEqual(readUiFacts({ refusalOnly: true }), { refusal: true, challenge: 'press-and-hold' });
+    assert.deepEqual(readUiFacts({ refusalOnly: true }), { refusal: true, challenge: 'press-and-hold', frameHost: 'unknown' });
   } finally { globalThis.document = saved; }
 });
 
@@ -315,7 +603,9 @@ test('recorded refusal survives a failed browser call with bounded metadata', as
     const error = await collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 2 }).catch(caught => caught);
     assert.equal(error.challenge, 'retailer-refusal', failedCall);
     assert.equal(error.short, undefined);
-    assert.match(error.message, /HTTP 403 \/blocked/);
+    assert.match(error.message, /HTTP 403/);
+    assert.equal(error.frameHost, 'shop.lululemon.com');
+    assert.doesNotMatch(error.message, /blocked/);
     assert.doesNotMatch(error.message, /private|secret|iframe|context/);
   }
 });
@@ -471,7 +761,8 @@ test('a 4xx on the View More product-data request (the section category) stops t
     const log = [];
     const page = clickingPage([initial, initial], [response(MEN_DATA, status, status % 2 ? 'fetch' : 'xhr')]);
     const error = await collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 50, log: line => log.push(line) }).catch(caught => caught);
-    assert.equal(error.message, `Collection refused by retailer: View More product-data request HTTP ${status} /.uf-svc/v1/categories/n18mhdznrqw. No publication.`);
+    assert.equal(error.message, `Collection refused by retailer: View More product-data request HTTP ${status}. No publication.`);
+    assert.equal(error.frameHost, 'shop.lululemon.com');
     assert.ok(log.includes(`Men product-data XHR after click 1: HTTP ${status} /.uf-svc/v1/categories/n18mhdznrqw`), log.join('\n'));
     assert.doesNotMatch(log.join('\n') + error.message, /secret|offset|slug|\?/);
     assert.deepEqual(page.trace, [SECTIONS[1].url, 'click']);
@@ -507,9 +798,8 @@ test('successful, non-XHR, other-host and pre-click responses do not stop expans
 test('401, 403 and 429 from any retailer resource still refuse, before or after a click, product data or not', async () => {
   for (const [status, url, type, when] of [[429, 'https://shop.lululemon.com/missing.png', 'image', 'after'], [403, 'https://shop.lululemon.com/api/dataenablement/profile', 'xhr', 'after'],
     [401, 'https://shop.lululemon.com/api/graphql', 'fetch', 'before'], [403, MEN_DATA, 'xhr', 'after']]) {
-    const path = new URL(url).pathname;
     const page = clickingPage([initial, initial], when === 'after' ? [response(url, status, type)] : [], when === 'before' ? [response(url, status, type)] : []);
-    const expected = url === MEN_DATA ? `View More product-data request HTTP ${status} ${path}` : `HTTP ${status} ${path}`;
+    const expected = url === MEN_DATA ? `View More product-data request HTTP ${status}` : `HTTP ${status}`;
     await assert.rejects(collectSection(page, SECTIONS[1], { paceMs: 0, pollMs: 1, timeoutMs: 50 }), { message: `Collection refused by retailer: ${expected}. No publication.` });
   }
 });
@@ -605,7 +895,7 @@ test('a page document without a body yet reads as not settled, and a refusal tit
   const saved = globalThis.document;
   try {
     globalThis.document = { body: null, title: '' };
-    assert.deepEqual(readUiFacts(), { grids: 0, cards: 0, total: null, buttons: 0, visibleButtons: 0, enabled: false, indicators: [], refusal: false });
+    assert.deepEqual(readUiFacts(), { grids: 0, cards: 0, total: null, buttons: 0, visibleButtons: 0, enabled: false, indicators: [], refusal: false, frameHost: 'unknown' });
     globalThis.document = { body: null, title: 'Access Denied' };
     assert.equal(readUiFacts().refusal, true);
   } finally { globalThis.document = saved; }
